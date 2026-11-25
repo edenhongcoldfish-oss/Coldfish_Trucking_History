@@ -382,3 +382,12 @@ details summary{cursor:pointer;color:var(--brand);font-weight:600}
 .lotcell{line-height:1.25;min-width:96px}
 .lotcell .small{font-size:.72rem}
 .chip-more{display:inline-block;margin-left:6px;padding:0 6px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line);font-size:.7rem;font-weight:600;color:var(--muted)}
+/* v0.8.2: accept window hint and early start */
+label.f .hint{font-weight:500;font-size:.74rem;color:var(--muted)}
+.early-box{margin-top:10px;display:flex;flex-direction:column;gap:8px}
+.early-box p{margin:0}
+.early-note{display:flex;align-items:center;gap:6px;margin:8px 0 0}
+.early-note.ok{color:var(--ok, #157347)}
+.early-note.bad{color:var(--bad, #b42318)}
+.early-requests{margin-bottom:14px}
+.early-requests h2{display:flex;align-items:center;gap:6px;margin-top:0}

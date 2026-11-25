@@ -6,7 +6,7 @@
   'use strict';
 
   // Bump on every release. The browser compares it with the server's copy to spot a server that was not restarted.
-  const APP_VERSION = '0.8.0';
+  const APP_VERSION = '0.8.2';
   // Main species shown as quick picks in Receiving (anything else goes under Other)
   const MAIN_SPECIES = ['Black Cod', 'Halibut', 'Salmon'];
   // Receiving: average weight of one packing unit, used to count cases/totes from the total weight.
@@ -127,6 +127,37 @@
     return new Date(new Date(plannedDeparture).getTime() - (Number(s.accept_early_min) || 0) * 60000).toISOString();
   }
   const STATUS_AFTER = { depart: 'in_progress', pickup_done: 'returning', return: 'returned' };
+  // ---------- one trip at a time (v0.8.1) ----------
+  // A driver can only drive one trip at a time. A trip with no estimate is counted as this many hours for overlap checks.
+  const DEFAULT_TRIP_HOURS = 8;
+  const RUNNING_STATUSES = ['in_progress', 'returning'];
+  const tripWindow = (planned, hours) => {
+    const start = new Date(planned).getTime();
+    const h = hours == null || hours === '' || !(Number(hours) > 0) ? DEFAULT_TRIP_HOURS : Number(hours);
+    return [start, start + h * 3600000];
+  };
+  // Trips (any scheduler's) that clash with a new trip: the driver is on the road now, or an assigned trip's time overlaps.
+  // `trips` = the driver's open trips ({ status, planned_departure, planned_hours }). Same-start trips always overlap.
+  function tripConflicts(trips, planned, hours) {
+    const [s, e] = tripWindow(planned, hours);
+    return trips.filter((t) => {
+      if (RUNNING_STATUSES.includes(t.status)) return true;
+      if (t.status !== 'dispatched') return false;
+      const [ts, te] = tripWindow(t.planned_departure, t.planned_hours);
+      return ts < e && s < te;
+    });
+  }
+  const BUSY_MSG = 'This driver is currently on a trip. Create anyway?';
+  // The driver's current trip: the running one, otherwise the earliest one not accepted yet (by planned start, then id).
+  // Only this trip has Accept / Pickup / Finish; later trips are view-only until it is finished.
+  function currentTrip(trips) {
+    const open = trips.filter((t) => ACTIVE_STATUSES.includes(t.status));
+    const running = open.find((t) => RUNNING_STATUSES.includes(t.status));
+    if (running) return running;
+    return open.slice().sort((a, b) => (new Date(a.planned_departure) - new Date(b.planned_departure)) || (a.id - b.id))[0] || null;
+  }
+  const FINISH_FIRST_MSG = 'Finish your current trip first';
+
 
   const DEFAULT_SETTINGS = {
     hourly_rate: null,          // TBD. Enter once decided
@@ -480,6 +511,11 @@
         ctx.trips.filter((t) => t.status === 'dispatched' && new Date(t.planned_departure).getTime() < now - 30 * 60000)
           .map((t) => tripLine(t, `planned ${new Date(t.planned_departure).toLocaleTimeString('en-CA', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false })}`)));
     }
+    if (has('dispatch.edit')) {
+      add('early', 'Early start requests', 'A driver asks to accept before the accept window opens.', 'info', 'dispatch',
+        ctx.trips.filter((t) => t.status === 'dispatched' && t.early_start && t.early_start.status === 'pending')
+          .map((t) => tripLine(t, `planned ${new Date(t.planned_departure).toLocaleTimeString('en-CA', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false })}`)));
+    }
     if (has('receipt.edit')) {
       add('receive', 'Waiting for receiving', 'Finished trips with no fish record yet.', 'warn', 'receipt',
         ctx.trips.filter((t) => t.status === 'returned' && (!t.team || t.team.lead_id === t.id)).map((t) => tripLine({ ...t, driver_name: teamNames(t) }, t.pickup_location)));
@@ -516,6 +552,7 @@
     payHistoryRows,
     APP_VERSION, MAIN_SPECIES, PACK_UNITS, LB_PER_TONNE, countFromWeight, lbOf, countText, orderOk, ROLES, ROLE_PERMS, ALL_PERMS, PAGES, EVENT_LABELS, BUTTON_LABELS, DRIVER_EVENTS, STATUS_LABELS, NEXT_EVENT,
     ALLOWED_EVENTS, ACTIVE_STATUSES, acceptOpensAt,
+    DEFAULT_TRIP_HOURS, RUNNING_STATUSES, tripWindow, tripConflicts, BUSY_MSG, currentTrip, FINISH_FIRST_MSG,
     STATUS_AFTER, DEFAULT_SETTINGS, permsFor, can, pagesFor, minutesBetween, roundMinutes,
     computePay, effectiveTimes, flags,
   };

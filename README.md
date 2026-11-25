@@ -72,6 +72,16 @@ long trip, Finish/receiving mismatch, open correction.
 - **Finish before pay**: Payroll cannot approve, and Accounting cannot mark paid, a trip until the driver pressed Finish ("Driver has not finished this trip yet"). Unfinished trips show under a warning on the Pay page.
 - Jaskaran's demo account has both Logistics Manager and Scheduler roles (an admin can give any person several roles on Users & roles). Sign-in buttons read "Role - Name".
 
+## One trip at a time (v0.8.1)
+- A driver can only drive one trip at a time. In **Assign trips**, if the driver (or the second driver of a team trip) is on the road now, or already has an assigned trip whose time overlaps the new one (booked by any scheduler), the app asks **"This driver is currently on a trip. Create anyway?"** with **Cancel** and **Create anyway**. The server refuses such a trip (409) unless the request carries `confirm: true`; Create anyway is noted in the audit log.
+- Overlap uses Planned start + Estimated hours. A trip with no estimate counts as **8 hours**. Estimated hours is an optional field in Assign trips.
+- **My Trips** shows a **Current trip** card (the running trip, or the earliest one not accepted yet) and an **Upcoming** list. Upcoming trips are view-only ("Finish your current trip first"). The server also refuses Accept on a later trip while an earlier one is unfinished.
+
+## Early start (v0.8.2)
+- Drivers can press Accept a few minutes before the planned start (Settings, "Accept opens before planned start", 15 min by default). Assign trips shows this under Planned start.
+- Before that, the driver's Current trip card says "You can accept 15 minutes before the start time. To leave early, ask your manager." with an **Early start** button (optional reason). One open request per trip.
+- Schedulers and Admins see **Early start requests** at the top of Assign trips (and on Today) and press **Approve** or **Decline** (optional reason). Approve lets the driver accept right away; the driver is notified either way and can ask again after a decline. Requests and decisions are in the audit log.
+
 ## Accounts and sign-in
 
 - **Demo mode** (`npm run demo`, start.bat): demo accounts and sample data, demo buttons on the sign-in page, a "Demo" badge on screen.

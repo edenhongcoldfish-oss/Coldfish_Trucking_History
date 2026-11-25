@@ -61,6 +61,18 @@ function logicChecks() {
   const c2 = trip(8, '2026-11-13', 8, 9); L.applyDriverPay([c2], {}, 15, custom);
   check('pay rules are editable (3 h minimum, lower wage floor)', c2.pay.callin === 120 && !c2.pay.checks.some((c) => c.tone === 'bad'), c2.pay);
   check('BC holiday list 2027', L.bcHolidays(2027).map((x) => x.date).join() === '2027-01-01,2027-02-15,2027-03-26,2027-05-24,2027-07-01,2027-08-02,2027-09-30,2027-10-11,2027-11-11,2027-12-25');
+  // one trip at a time (v0.8.1)
+  const T = (h, m, hours, status = 'dispatched', id = 1) => ({ id, status, planned_hours: hours, planned_departure: new Date(`2026-12-01T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00-08:00`).toISOString() });
+  const at1040 = T(10, 40).planned_departure;
+  check('overlap: 10:30 (no estimate = 8 h) clashes with 10:40', L.tripConflicts([T(10, 30, null)], at1040, null).length === 1);
+  check('overlap: 09:00 for 1 h does not clash with 10:40', L.tripConflicts([T(9, 0, 1)], at1040, 2).length === 0);
+  check('overlap: 10:30 with no estimate runs to 18:30, so 18:31 is free', L.tripConflicts([T(10, 30, null)], T(18, 31).planned_departure, 1).length === 0
+    && L.tripConflicts([T(10, 30, null)], T(18, 29).planned_departure, 1).length === 1);
+  check('overlap: new trip with no estimate counts 8 h (10:40 to 18:40 hits a 17:00 trip)', L.tripConflicts([T(17, 0, 1)], at1040, null).length === 1);
+  check('overlap: a running trip always clashes, finished/cancelled never do', L.tripConflicts([T(1, 0, 1, 'in_progress')], at1040, 1).length === 1
+    && L.tripConflicts([T(10, 30, 8, 'returned'), T(10, 30, 8, 'cancelled')], at1040, 1).length === 0);
+  check('current trip: running one wins, else earliest planned (then lowest id)', L.currentTrip([T(8, 0, 1, 'dispatched', 1), T(9, 0, 1, 'in_progress', 2)]).id === 2
+    && L.currentTrip([T(9, 0, 1, 'dispatched', 3), T(8, 0, 1, 'dispatched', 4), T(8, 0, 1, 'dispatched', 2)]).id === 2 && L.currentTrip([]) === null);
   const dd = L.deductionsFor(100, { pay_rules: { deductions: [{ name: 'CPP', pct: 5.95 }, { name: 'EI', pct: 1.64 }] } });
   check('deduction estimate', dd.total === 7.59 && dd.net === 92.41, dd);
 }
@@ -124,7 +136,11 @@ function logicChecks() {
   const later = await sch.call('POST', '/trips', { driver_id: d1.me.user.id, vehicle: 'TRK-98', pickup_location: 'Tomorrow Pickup', destination: 'Company Yard', planned_departure: new Date(Date.now() + 20 * 3600000).toISOString(), planned_hours: 5 });
   const acceptEarly = await d1.call('POST', `/trips/${later.data.id}/events`, { type: 'depart' });
   check('Accept the day before -> 409', acceptEarly.status === 409 && /Accept opens/.test(acceptEarly.data.error), acceptEarly.data);
-  const created = await sch.call('POST', '/trips', { driver_id: d1.me.user.id, vehicle: 'TRK-99', pickup_location: 'Test Pickup', destination: 'Company Yard', planned_departure: new Date().toISOString(), planned_hours: 5 });
+  const createBody = { driver_id: d1.me.user.id, vehicle: 'TRK-99', pickup_location: 'Test Pickup', destination: 'Company Yard', planned_departure: new Date().toISOString(), planned_hours: 5 };
+  const warn = await sch.call('POST', '/trips', createBody);
+  check('driver 1 already has a trip at that time -> 409 warning (not created)', warn.status === 409 && warn.data.code === 'driver_busy' && warn.data.error === 'This driver is currently on a trip. Create anyway?'
+    && warn.data.conflicts.some((c) => c.driver_id === d1.me.user.id && c.status === 'dispatched'), warn.data);
+  const created = await sch.call('POST', '/trips', { ...createBody, confirm: true });
   check('scheduler creates trip -> 201', created.status === 201, created.data);
   const tid = created.data.id;
   const nd = (await d1.call('GET', '/notifications')).data;
@@ -143,7 +159,7 @@ function logicChecks() {
   check('finished trip leaves My Trips', !(await d1.call('GET', '/trips?scope=my')).data.some((t) => t.id === tid));
   check('finished trip stays in Trip History', (await d1.call('GET', '/trips?scope=history')).data.some((t) => t.id === tid));
   // A truck still on the road cannot be received (only after the driver taps Finish)
-  const early = await sch.call('POST', '/trips', { driver_id: d2.me.user.id, vehicle: 'TRK-97', pickup_location: 'Early Pickup', destination: 'Company Yard', planned_departure: new Date().toISOString(), planned_hours: 5 });
+  const early = await sch.call('POST', '/trips', { driver_id: d2.me.user.id, vehicle: 'TRK-97', pickup_location: 'Early Pickup', destination: 'Company Yard', planned_departure: new Date().toISOString(), planned_hours: 5, confirm: true });
   await d2.call('POST', `/trips/${early.data.id}/events`, { type: 'depart' });
   check('receiving a trip still on the road -> 409', (await rec.call('POST', `/trips/${early.data.id}/receipt`, { result: 'ok', items: [{ species: 'Salmon', lot: 'L9', lb: 500 }] })).status === 409);
   check('receiving without fish lines -> 400', (await rec.call('POST', `/trips/${tid}/receipt`, { result: 'ok' })).status === 400);
@@ -178,7 +194,7 @@ function logicChecks() {
   check('search received fish by species', (await log.call('GET', '/receipts?fish=Halibut')).data.every((x) => x.species === 'Halibut'));
   check('driver searches received fish -> 403', (await d1.call('GET', '/receipts')).status === 403);
   check('driver menu is My Trips, History, Pay', JSON.stringify(d1.me.pages.map((p) => p.id)) === '["my","history","pay"]', d1.me.pages);
-  const quick = await sch.call('POST', '/trips', { driver_id: d1.me.user.id, vehicle: 'TRK-97', pickup_location: 'Short Run', destination: 'Company Yard', planned_departure: new Date().toISOString() });
+  const quick = await sch.call('POST', '/trips', { driver_id: d1.me.user.id, vehicle: 'TRK-97', pickup_location: 'Short Run', destination: 'Company Yard', planned_departure: new Date().toISOString(), confirm: true });
   const tap = new Date(Date.now() - 10000).toISOString();
   check('accept then finish without pickup', (await d1.call('POST', `/trips/${quick.data.id}/events`, { type: 'depart', at: tap })).status === 200
     && (await d1.call('POST', `/trips/${quick.data.id}/events`, { type: 'return', at: new Date(Date.now() - 3600000).toISOString() })).status === 200);
@@ -299,7 +315,7 @@ function logicChecks() {
   check('unknown vehicle type -> 400', (await sch.call('POST', '/trips', { ...tm, driver_id: d1.me.user.id, vehicle_type: 'Flying carpet' })).status === 400);
   check('team with the same driver twice -> 400', (await sch.call('POST', '/trips', { ...tm, driver_id: d1.me.user.id, second_driver_id: d1.me.user.id })).status === 400);
   check('team with a non-driver -> 400', (await sch.call('POST', '/trips', { ...tm, driver_id: d1.me.user.id, second_driver_id: sch.me.user.id })).status === 400);
-  const team = await sch.call('POST', '/trips', { ...tm, driver_id: d1.me.user.id, second_driver_id: d4.me.user.id, vehicle_type: '15 ton truck' });
+  const team = await sch.call('POST', '/trips', { ...tm, driver_id: d1.me.user.id, second_driver_id: d4.me.user.id, vehicle_type: '15 ton truck', confirm: true });
   check('scheduler assigns a team trip (2 drivers)', team.status === 201, team.data);
   const my1 = (await d1.call('GET', '/trips?scope=my')).data.find((t) => t.team && t.team.mates.some((m) => m.name === d4.me.user.name));
   const my4 = (await d4.call('GET', '/trips?scope=my')).data.find((t) => t.team && t.team.mates.some((m) => m.name === d1.me.user.name));
@@ -345,10 +361,87 @@ function logicChecks() {
   check('Accounting pays each driver once (2 pay lines, team shown)', poTeam.length === 2 && poTeam.every((x) => x.team_with), poTeam);
   check('a driver sees only their own pay for the team trip', (await d4.call('GET', '/pay')).data.trips.filter((t) => t.id === my1.id).length === 0 && (await d4.call('GET', '/pay')).data.trips.some((t) => t.id === my4.id));
   // Team cancel: neither accepted -> both cancelled
-  const t2 = await sch.call('POST', '/trips', { ...tm, planned_departure: new Date(Date.now() + 40 * 3600000).toISOString(), driver_id: d1.me.user.id, second_driver_id: d4.me.user.id });
+  const t2 = await sch.call('POST', '/trips', { ...tm, planned_departure: new Date(Date.now() + 40 * 3600000).toISOString(), driver_id: d1.me.user.id, second_driver_id: d4.me.user.id, confirm: true });
   const t2rows = () => sch.call('GET', '/trips?scope=dispatch').then((r) => r.data.filter((t) => t.team && t.team.lead_id === t2.data.id));
   check('cancelling a team trip cancels both drivers\' trips', (await t2rows()).length === 2 && (await sch.call('POST', `/trips/${t2.data.id}/cancel`, { reason: 'test' })).status === 200
     && (await t2rows()).every((t) => t.status === 'cancelled'));
+
+  // ---------- one trip at a time (v0.8.1) ----------
+  // Two different schedulers: Kaitlin books 10:30 (no estimate = 8 h), then Jaskaran books 10:40 for the same driver
+  const day10 = new Date(Date.now() + 10 * 864e5);
+  const atLocal = (h, m) => { const d = new Date(day10); d.setHours(h, m, 0, 0); return d.toISOString(); };
+  const base = { vehicle: 'TRK-OV', pickup_location: 'Overlap Pickup', destination: 'Company Yard' };
+  const b1030 = await sch.call('POST', '/trips', { ...base, driver_id: d1.me.user.id, planned_departure: atLocal(10, 30) });
+  check('10:30 trip booked by scheduler A', b1030.status === 201, b1030.data);
+  const b1040 = await log.call('POST', '/trips', { ...base, driver_id: d1.me.user.id, planned_departure: atLocal(10, 40), planned_hours: 2 });
+  check('10:40 booked by scheduler B for the same driver -> 409 warning naming the 10:30 trip', b1040.status === 409 && b1040.data.code === 'driver_busy'
+    && b1040.data.conflicts.length === 1 && b1040.data.conflicts[0].trip_id === b1030.data.id && b1040.data.conflicts[0].planned_hours === null, b1040.data);
+  check('the warned trip was not created', !(await d1.call('GET', '/trips?scope=my')).data.some((t) => t.planned_departure === atLocal(10, 40)));
+  check('a trip after the 8 h default window (18:31) needs no warning', (await log.call('POST', '/trips', { ...base, driver_id: d1.me.user.id, planned_departure: atLocal(18, 31), planned_hours: 1 })).status === 201);
+  check('an earlier trip that ends before 10:30 needs no warning', (await log.call('POST', '/trips', { ...base, driver_id: d1.me.user.id, planned_departure: atLocal(8, 0), planned_hours: 2 })).status === 201);
+  const teamClash = await log.call('POST', '/trips', { ...base, driver_id: d2.me.user.id, second_driver_id: d1.me.user.id, planned_departure: atLocal(11, 0), planned_hours: 1 });
+  check('team trip: the SECOND driver overlap is caught too', teamClash.status === 409 && teamClash.data.conflicts.some((c) => c.driver_id === d1.me.user.id && c.trip_id === b1030.data.id)
+    && teamClash.data.conflicts.some((c) => c.driver_id === d2.me.user.id && c.status === 'in_progress'), teamClash.data);
+  const d3 = await session('driver3');
+  const onRoad = await sch.call('POST', '/trips', { ...base, driver_id: d3.me.user.id, planned_departure: new Date(Date.now() + 30 * 864e5).toISOString(), planned_hours: 1 });
+  check('driver on the road now -> warning even for a trip next month', onRoad.status === 409 && onRoad.data.conflicts.some((c) => c.status === 'returning'), onRoad.data);
+  const anyway = await log.call('POST', '/trips', { ...base, driver_id: d1.me.user.id, planned_departure: atLocal(10, 40), planned_hours: 2, confirm: true });
+  check('Create anyway (confirm) -> 201', anyway.status === 201, anyway.data);
+  check('Create anyway is recorded in the audit log', (await admin.call('GET', '/audit')).data.some((x) => x.action === 'trip.create' && String(x.entity_id) === String(anyway.data.id)
+    && x.detail && (x.detail.created_despite || []).includes(b1030.data.trip_no)));
+  check('confirm must be a real true (string "true" still warns)', (await log.call('POST', '/trips', { ...base, driver_id: d1.me.user.id, planned_departure: atLocal(10, 50), confirm: 'true' })).status === 409);
+  // Only the current trip can be accepted: Driver 4 gets two trips today (the second one Create anyway)
+  const nowIso = (minAgo) => new Date(Date.now() - minAgo * 60000).toISOString();
+  const first = await sch.call('POST', '/trips', { ...base, driver_id: d4.me.user.id, planned_departure: nowIso(2), planned_hours: 1, confirm: true });
+  const second = await sch.call('POST', '/trips', { ...base, driver_id: d4.me.user.id, planned_departure: nowIso(1), planned_hours: 1, confirm: true });
+  const my4b = (await d4.call('GET', '/trips?scope=my')).data;
+  check('My Trips: current trip = earliest not accepted, the other is upcoming', L.currentTrip(my4b).id === first.data.id && my4b.some((t) => t.id === second.data.id), my4b.map((t) => [t.id, t.trip_no, t.status]));
+  const jump = await d4.call('POST', `/trips/${second.data.id}/events`, { type: 'depart' });
+  check('Accept on a later trip while the current one is unfinished -> 409', jump.status === 409 && /Finish your current trip first/.test(jump.data.error), jump.data);
+  check('Accept the current trip', (await d4.call('POST', `/trips/${first.data.id}/events`, { type: 'depart' })).status === 200);
+  check('later trip still cannot be accepted, picked up or finished while one is running', (await d4.call('POST', `/trips/${second.data.id}/events`, { type: 'depart' })).status === 409
+    && (await d4.call('POST', `/trips/${second.data.id}/events`, { type: 'pickup_done' })).status === 409 && (await d4.call('POST', `/trips/${second.data.id}/events`, { type: 'return' })).status === 409);
+  check('Finish the current trip', (await d4.call('POST', `/trips/${first.data.id}/events`, { type: 'return' })).status === 200);
+  check('the next trip becomes current and can be accepted', L.currentTrip((await d4.call('GET', '/trips?scope=my')).data).id === second.data.id
+    && (await d4.call('POST', `/trips/${second.data.id}/events`, { type: 'depart' })).status === 200);
+  await d4.call('POST', `/trips/${second.data.id}/events`, { type: 'return' });
+
+  // ---------- early start (v0.8.2) ----------
+  // Driver 4's current trip is the sample trip tomorrow morning, so Accept is not open yet
+  check('accept window minutes sent to the app (one setting, 15 by default)', d4.me.accept_early_min === 15 && sch.me.accept_early_min === 15, d4.me.accept_early_min);
+  const cur4 = L.currentTrip((await d4.call('GET', '/trips?scope=my')).data);
+  const tooEarly = await d4.call('POST', `/trips/${cur4.id}/events`, { type: 'depart' });
+  check('Accept before the window -> 409 that points to Early start', tooEarly.status === 409 && /Accept opens/.test(tooEarly.data.error) && /Early start/.test(tooEarly.data.error), tooEarly.data);
+  const later4 = await sch.call('POST', '/trips', { ...base, driver_id: d4.me.user.id, planned_departure: new Date(Date.now() + 3 * 864e5).toISOString(), planned_hours: 1, confirm: true });
+  check('early start on a later (not current) trip -> 409', (await d4.call('POST', `/trips/${later4.data.id}/early-start`, {})).status === 409);
+  check('another driver cannot ask for it -> 404', (await d1.call('POST', `/trips/${cur4.id}/early-start`, {})).status === 404);
+  check('office staff without a driver role cannot ask -> 403', (await sch.call('POST', `/trips/${cur4.id}/early-start`, {})).status === 403);
+  const es1 = await d4.call('POST', `/trips/${cur4.id}/early-start`, { reason: 'Ferry leaves at 5' });
+  check('driver asks for an early start -> 201', es1.status === 201 && es1.data.status === 'pending', es1.data);
+  check('only one open request per trip -> 409', (await d4.call('POST', `/trips/${cur4.id}/early-start`, {})).status === 409);
+  check('still cannot accept while it is pending', (await d4.call('POST', `/trips/${cur4.id}/events`, { type: 'depart' })).status === 409);
+  check('scheduler is notified', (await sch.call('GET', '/notifications')).data.items.some((n) => n.title === 'Early start request' && n.link === '#dispatch'));
+  check('Today lists the request for the scheduler', (await sch.call('GET', '/today')).data.some((x) => x.key === 'early' && x.list.some((y) => y.trip_id === cur4.id)));
+  check('driver sees the request as waiting', (await d4.call('GET', `/trips/${cur4.id}`)).data.early_start.status === 'pending');
+  const list1 = await sch.call('GET', '/early-starts');
+  check('managers see it in the requests list with the reason', list1.status === 200 && list1.data.some((x) => x.id === es1.data.id && x.status === 'pending' && x.reason === 'Ferry leaves at 5' && x.driver_name === 'Driver 4'), list1.data);
+  check('drivers and payroll cannot list or decide requests -> 403', (await d4.call('GET', '/early-starts')).status === 403 && (await d4.call('POST', `/early-starts/${es1.data.id}`, { approve: true })).status === 403
+    && (await pay.call('POST', `/early-starts/${es1.data.id}`, { approve: true })).status === 403);
+  check('Jaskaran (Scheduler) declines with a reason', (await log.call('POST', `/early-starts/${es1.data.id}`, { approve: false, reason: 'No dock crew before 6' })).status === 200);
+  check('already handled -> 409', (await sch.call('POST', `/early-starts/${es1.data.id}`, { approve: true })).status === 409);
+  const dec = (await d4.call('GET', `/trips/${cur4.id}`)).data.early_start;
+  check('driver sees the decline and the reason, and is notified', dec.status === 'declined' && dec.decline_reason === 'No dock crew before 6'
+    && (await d4.call('GET', '/notifications')).data.items.some((n) => n.title === 'Early start declined'), dec);
+  check('declined: Accept still closed', (await d4.call('POST', `/trips/${cur4.id}/events`, { type: 'depart' })).status === 409);
+  const es2 = await d4.call('POST', `/trips/${cur4.id}/early-start`, {});
+  check('driver can ask again after a decline', es2.status === 201, es2.data);
+  check('scheduler approves', (await sch.call('POST', `/early-starts/${es2.data.id}`, { approve: true })).status === 200);
+  check('driver is told it was approved', (await d4.call('GET', '/notifications')).data.items.some((n) => n.title === 'Early start approved'));
+  check('approved: the driver can accept now', (await d4.call('POST', `/trips/${cur4.id}/events`, { type: 'depart' })).status === 200);
+  check('no early start on a trip already accepted -> 409', (await d4.call('POST', `/trips/${cur4.id}/early-start`, {})).status === 409);
+  const aud = (await admin.call('GET', '/audit')).data;
+  check('early start request, decline and approval are in the audit log', ['early_start.request', 'early_start.decline', 'early_start.approve'].every((x) => aud.some((y) => y.action === x)));
+  await d4.call('POST', `/trips/${cur4.id}/events`, { type: 'return' });
 
   // Demo reset (last: it wipes everything above)
   check('non-admin demo reset -> 403', (await pay.call('POST', '/admin/demo-reset', { confirm: 'RESET' })).status === 403);

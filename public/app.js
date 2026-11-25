@@ -17,7 +17,7 @@
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 && path !== '/login') { me = null; render(); throw new Error(data.error || 'Please sign in.'); }
-    if (!res.ok) throw new Error(data.error || 'Request failed.');
+    if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed.'), { status: res.status, data });
     return data;
   }
 
@@ -230,10 +230,13 @@
 
   // ---------- page: My Trips (driver) ----------
   // Only open trips are shown here. Finished trips move to Trip History.
+  // One trip at a time: the Current trip card is the running trip, or the earliest one not accepted yet.
+  // Only that card has buttons; Upcoming trips are view-only until the current one is finished.
   async function pageMy(main) {
     const trips = await api('GET', '/trips?scope=my');
-    const running = trips.find((t) => t.status !== 'dispatched');
-    const upcoming = trips.filter((t) => t !== running).sort((a, b) => new Date(a.planned_departure) - new Date(b.planned_departure));
+    const current = L.currentTrip(trips);
+    const running = current && current.status !== 'dispatched' ? current : null;
+    const upcoming = trips.filter((t) => t !== current).sort((a, b) => (new Date(a.planned_departure) - new Date(b.planned_departure)) || (a.id - b.id));
     main.append(pageHead('My Trips', running ? null : 'Press Accept when your trip starts and Finish when you are done. The server records the time.'));
     const press = async (t, type) => {
       const label = L.BUTTON_LABELS[type];
@@ -245,35 +248,64 @@
       main.querySelectorAll('button').forEach((b) => { b.disabled = true; });
       startUndo(t, type);
     };
+    const metaRow = (t) => h('div', { class: 'meta' }, h('span', null, icon('truck', 'sm'), vehicleText(t)), h('span', null, '#', t.trip_no), t.team ? h('span', null, icon('users', 'sm'), withText(t)) : null,
+      t.planned_hours ? h('span', null, icon('clock', 'sm'), `about ${t.planned_hours} h`) : null, t.cargo_ref ? h('span', null, icon('box', 'sm'), t.cargo_ref) : null);
     if (running) {
       const t = running;
-      main.append(h('div', { class: 'card hero' },
+      main.append(h('div', { class: 'card hero current-trip' },
         h('div', { class: 'spread' }, h('span', { class: 'eyebrow' }, 'Current trip'), h('span', { class: 'row gap4' }, teamChip(t), statusChip(t.status), flagChips(t))),
         h('div', { class: 'elapsed' }, h('b', null, fmtMin(t.elapsed_min)), h('span', { class: 'muted' }, `since you accepted at ${fmtClock(t.times.depart)}`)),
-        h('div', { class: 'meta' }, h('span', null, icon('truck', 'sm'), vehicleText(t)), h('span', null, '#', t.trip_no), t.team ? h('span', null, icon('users', 'sm'), withText(t)) : null, t.cargo_ref ? h('span', null, icon('box', 'sm'), t.cargo_ref) : null),
-        routeBlock(t), stepper(t),
+        metaRow(t), routeBlock(t), stepper(t),
         h('button', { class: 'btn primary big go-finish', onclick: () => press(t, 'return') }, icon('flag', 'lg'), 'Finish trip'),
         h('div', { class: 'row mt12' },
           t.status === 'in_progress' ? h('button', { class: 'btn grow', onclick: () => press(t, 'pickup_done') }, icon('box', 'sm'), 'Pickup done') : null,
           h('button', { class: 'btn ghost', onclick: () => correctionForm(t) }, icon('edit', 'sm'), 'Fix a time'))));
-    }
-    main.append(h('h2', null, running ? 'Up next' : 'Assigned to you', h('span', { class: 'count' }, upcoming.length)));
-    if (!upcoming.length) main.append(emptyBox(running ? 'Nothing else assigned yet.' : 'No trips assigned to you right now.', 'route'));
-    upcoming.forEach((t, i) => {
+    } else if (current) {
+      const t = current;
       const opens = new Date(t.accept_opens_at);
       const early = Date.now() < opens.getTime();
       const sameDay = opens.toDateString() === new Date().toDateString();
-      let btn;
-      if (running) btn = h('button', { class: 'btn block', disabled: true }, icon('lock', 'sm'), 'Finish your current trip first');
-      else if (early) btn = h('button', { class: 'btn block', disabled: true }, icon('clock', 'sm'), `Accept opens ${sameDay ? 'at ' + fmtClock(opens) : fmtTime(opens)}`);
-      else btn = h('button', { class: 'btn primary big', onclick: () => press(t, 'depart') }, icon('play', 'lg'), 'Accept trip');
-      main.append(h('div', { class: 'card next-card' + (i === 0 && !running && !early ? ' hero' : '') },
-        h('div', { class: 'spread' }, h('div', null, h('div', { class: 'trip-no' }, fmtDate(t.planned_departure), ' · ', fmtClock(t.planned_departure)), h('div', { class: 'muted small' }, `#${t.trip_no}`)), h('span', { class: 'row gap4' }, teamChip(t), statusChip(t.status))),
-        routeBlock(t),
-        h('div', { class: 'meta' }, h('span', null, icon('truck', 'sm'), vehicleText(t)), t.team ? h('span', null, icon('users', 'sm'), withText(t)) : null, t.planned_hours ? h('span', null, icon('clock', 'sm'), `about ${t.planned_hours} h`) : null, t.cargo_ref ? h('span', null, icon('box', 'sm'), t.cargo_ref) : null),
-        btn));
+      const es = t.early_start;
+      const approvedEarly = early && es && es.status === 'approved';
+      main.append(h('div', { class: 'card hero current-trip' },
+        h('div', { class: 'spread' }, h('span', { class: 'eyebrow' }, 'Current trip'), h('span', { class: 'row gap4' }, teamChip(t), statusChip(t.status))),
+        h('div', { class: 'trip-no' }, fmtDate(t.planned_departure), ' · ', fmtClock(t.planned_departure)),
+        metaRow(t), routeBlock(t),
+        early && !approvedEarly ? [
+          h('button', { class: 'btn block', disabled: true }, icon('clock', 'sm'), `Accept opens ${sameDay ? 'at ' + fmtClock(opens) : fmtTime(opens)}`),
+          earlyStartBox(t, es)]
+          : [approvedEarly ? h('p', { class: 'small early-note ok' }, icon('check', 'sm'), `Early start approved${es.decided_by_name ? ' by ' + es.decided_by_name : ''}. You can accept now.`) : null,
+            h('button', { class: 'btn primary big', onclick: () => press(t, 'depart') }, icon('play', 'lg'), 'Accept trip')]));
+    } else {
+      main.append(emptyBox('No trips assigned to you right now.', 'route'));
+    }
+    main.append(h('h2', null, 'Upcoming', h('span', { class: 'count' }, upcoming.length)));
+    if (!upcoming.length) main.append(h('p', { class: 'sub' }, 'Nothing else assigned yet.'));
+    upcoming.forEach((t) => {
+      main.append(h('div', { class: 'card next-card upcoming-trip' },
+        h('div', { class: 'spread' }, h('div', null, h('div', { class: 'trip-no' }, fmtDate(t.planned_departure), ' · ', fmtClock(t.planned_departure))), h('span', { class: 'row gap4' }, teamChip(t), statusChip(t.status))),
+        routeBlock(t), metaRow(t),
+        h('button', { class: 'btn block', disabled: true }, icon('lock', 'sm'), L.FINISH_FIRST_MSG)));
     });
     main.append(h('div', { class: 'linkrow' }, h('a', { class: 'btn ghost', href: '#history' }, icon('clock', 'sm'), 'Finished trips are in Trip History')));
+  }
+
+  // Early start: Accept opens a few minutes before the planned start. To leave earlier the driver asks a manager.
+  function earlyStartBox(t, es) {
+    const min = me.accept_early_min != null ? me.accept_early_min : L.DEFAULT_SETTINGS.accept_early_min;
+    const request = async () => {
+      const reason = await ask('Ask to start early', { input: true, optional: true, ok: 'Send request',
+        text: 'Your manager (Scheduler) gets the request. Once approved you can accept right away. Reason (optional):' });
+      if (reason === null) return;
+      act(() => api('POST', `/trips/${t.id}/early-start`, { reason: reason || null }), 'Early start request sent');
+    };
+    let state;
+    if (es && es.status === 'pending') state = h('button', { class: 'btn block', disabled: true }, icon('clock', 'sm'), 'Early start requested · waiting for manager');
+    else if (es && es.status === 'declined') state = [h('p', { class: 'small early-note bad' }, icon('x', 'sm'), `Early start declined${es.decline_reason ? ': ' + es.decline_reason : '.'}`),
+      h('button', { class: 'btn block', onclick: request }, icon('play', 'sm'), 'Ask again (Early start)')];
+    else state = h('button', { class: 'btn block', onclick: request }, icon('play', 'sm'), 'Early start');
+    return h('div', { class: 'early-box' },
+      h('p', { class: 'small muted' }, `You can accept ${min} minutes before the start time. To leave early, ask your manager.`), state);
   }
 
   // Accept and Finish wait 10 seconds before they are saved, so a mistaken tap can be undone.
@@ -347,6 +379,26 @@
   // ---------- page: Dispatch ----------
   async function pageDispatch(main) {
     main.append(pageHead('Assign trips', 'New trips show up right away on the driver\'s My Trips page. The driver can press Accept from shortly before the planned departure.'));
+    // Early start requests from drivers: shown here only while there is something to handle (or just handled)
+    const early = await api('GET', '/early-starts').catch(() => []);
+    if (early.length) {
+      const open = early.filter((x) => x.status === 'pending');
+      main.append(h('div', { class: 'card early-requests' },
+        h('h2', null, icon('clock', 'sm'), 'Early start requests', h('span', { class: 'count' }, open.length)),
+        h('p', { class: 'sub mt0' }, 'Drivers asking to accept before the accept window opens. Approve lets the driver accept right away.'),
+        tripTable(early.map((x) => Object.assign({}, x, { id: x.trip_id, req_id: x.id })), [
+          ['Driver', (x) => x.driver_name], ['Trip', (x) => x.trip_no], ['Planned', (x) => fmtTime(x.planned_departure)],
+          ['Reason', (x) => x.reason || '–'],
+          ['', (x) => x.status !== 'pending' ? h('span', { class: 'chip ' + (x.status === 'approved' ? 'ok' : 'gray') }, `${x.status === 'approved' ? 'Approved' : 'Declined'}${x.decided_by_name ? ' · ' + x.decided_by_name : ''}`)
+            : can('dispatch.edit') ? h('span', { class: 'row gap4' },
+              h('button', { class: 'btn small primary', onclick: (e) => { e.stopPropagation(); act(() => api('POST', `/early-starts/${x.req_id}`, { approve: true }), 'Early start approved'); } }, 'Approve'),
+              h('button', { class: 'btn small', onclick: async (e) => {
+                e.stopPropagation();
+                const reason = await ask('Decline early start', { input: true, optional: true, ok: 'Decline', danger: true, text: 'The driver is told. Reason (optional):' });
+                if (reason !== null) act(() => api('POST', `/early-starts/${x.req_id}`, { approve: false, reason: reason || null }), 'Early start declined');
+              } }, 'Decline')) : h('span', { class: 'chip warn' }, 'Waiting')],
+        ])));
+    }
     if (can('dispatch.edit')) {
       const [drivers, saved, types] = await Promise.all([api('GET', '/drivers'), api('GET', '/addresses').catch(() => []), api('GET', '/vehicle-types').catch(() => [])]);
       const f = {
@@ -357,6 +409,7 @@
         pickup_location: h('input', { list: 'saved-addresses', placeholder: 'Start typing, saved addresses appear', maxlength: 200, autocomplete: 'off' }),
         destination: h('input', { list: 'saved-addresses', value: 'Company Yard', maxlength: 200, autocomplete: 'off' }),
         planned_departure: h('input', { type: 'datetime-local', value: toLocalInput(Date.now() + 3600000) }),
+        planned_hours: h('input', { type: 'number', min: 0, max: 48, step: 0.5, placeholder: `${L.DEFAULT_TRIP_HOURS} if blank` }),
         cargo_ref: h('input', { placeholder: 'PO-…', maxlength: 100 }),
       };
       // One button: add a new vehicle type to the list (Scheduler / Admin)
@@ -369,6 +422,28 @@
           toast('Vehicle type added');
         } catch (e) { toast(e.message, true); }
       }
+      // Create the trip. If a driver is already on a trip, or has another trip at an overlapping time (any scheduler's),
+      // the server answers 409 and we ask before creating it anyway.
+      async function createTrip() {
+        const body = {
+          driver_id: f.driver_id.value, second_driver_id: f.second_driver_id.value || null, vehicle_type: f.vehicle_type.value || null, vehicle: f.vehicle.value, pickup_location: f.pickup_location.value, destination: f.destination.value,
+          planned_departure: f.planned_departure.value ? new Date(f.planned_departure.value).toISOString() : '',
+          planned_hours: f.planned_hours.value || null, cargo_ref: f.cargo_ref.value,
+        };
+        if (busy) return; // ignore double taps
+        let clash = null;
+        busy = true;
+        try { await api('POST', '/trips', body); }
+        catch (e) {
+          if (e.status === 409 && e.data && e.data.code === 'driver_busy') clash = e.data;
+          else { toast(e.message, true); return; } // keep what was typed so it can be fixed
+        } finally { busy = false; }
+        if (!clash) { toast('Trip dispatched'); return route(); }
+        const busyData = clash;
+        const lines = busyData.conflicts.map((c) => `${c.driver_name}: trip ${c.trip_no}, ${c.status === 'dispatched' ? `assigned for ${fmtTime(c.planned_departure)} (about ${c.planned_hours == null ? L.DEFAULT_TRIP_HOURS : c.planned_hours} h)` : 'on the road now'}`);
+        const ok = await ask(L.BUSY_MSG, { ok: 'Create anyway', danger: true, text: `${lines.join('. ')}. A driver can only drive one trip at a time.` });
+        if (ok) act(() => api('POST', '/trips', Object.assign({}, body, { confirm: true })), 'Trip dispatched');
+      }
       main.append(h('datalist', { id: 'saved-addresses' }, saved.map((a) => h('option', { value: a.address }))));
       main.append(h('div', { class: 'card form-card' }, h('h2', null, icon('plus', 'sm'), 'New trip'),
         h('p', { class: 'sub mt0 mb12' }, 'Saved addresses appear as you type. New addresses are saved automatically when you create the trip. Press Map to check one on Google Maps.'), h('div', { class: 'form two' },
@@ -378,15 +453,12 @@
         h('label', { class: 'f' }, 'Truck no.', f.vehicle),
         h('label', { class: 'f span2' }, 'Pickup address', h('div', { class: 'input-row' }, f.pickup_location, mapButton(f.pickup_location))),
         h('label', { class: 'f span2' }, 'Destination address', h('div', { class: 'input-row' }, f.destination, mapButton(f.destination))),
-        h('label', { class: 'f' }, 'Planned start', f.planned_departure),
-        h('label', { class: 'f' }, 'PO / note (optional)', f.cargo_ref),
-        h('button', {
-          class: 'btn primary', onclick: () => act(() => api('POST', '/trips', {
-            driver_id: f.driver_id.value, second_driver_id: f.second_driver_id.value || null, vehicle_type: f.vehicle_type.value || null, vehicle: f.vehicle.value, pickup_location: f.pickup_location.value, destination: f.destination.value,
-            planned_departure: f.planned_departure.value ? new Date(f.planned_departure.value).toISOString() : '',
-            cargo_ref: f.cargo_ref.value,
-          }), 'Trip dispatched'),
-        }, 'Create trip'))));
+        h('label', { class: 'f' }, 'Planned start', f.planned_departure,
+          h('span', { class: 'small muted hint' }, `Drivers can accept ${me.accept_early_min != null ? me.accept_early_min : L.DEFAULT_SETTINGS.accept_early_min} minutes before this time.`)),
+        h('label', { class: 'f' }, 'Estimated hours (optional)', f.planned_hours),
+        h('label', { class: 'f span2' }, 'PO / note (optional)', f.cargo_ref),
+        h('button', { class: 'btn primary', onclick: createTrip },
+          'Create trip'))));
       main.lastChild.querySelector('.form.two > button').classList.add('span2');
     }
     const trips = await api('GET', '/trips?scope=dispatch');

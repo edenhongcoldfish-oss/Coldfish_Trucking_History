@@ -10,7 +10,7 @@ const r = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // ---------- input validation ----------
-class Bad extends Error { constructor(m, status) { super(m); this.status = status || 400; this.expose = true; } }
+class Bad extends Error { constructor(m, status, extra) { super(m); this.status = status || 400; this.expose = true; if (extra) this.extra = extra; } }
 function str(v, name, { min = 1, max = 200, optional = false } = {}) {
   if (v == null || v === '') { if (optional) return null; throw new Bad(`Please enter ${name}.`); }
   if (typeof v !== 'string') throw new Bad(`${name} is not in a valid format.`);
@@ -66,7 +66,7 @@ async function loadTrips(where, params, q = db) {
   if (!trips.length) return [];
   const ids = trips.map((t) => t.id);
   const teamIds = [...new Set(trips.map((t) => t.team_id).filter(Boolean))];
-  const [ev, memos, corr, pay, settings, mateRows] = await Promise.all([
+  const [ev, memos, corr, pay, settings, mateRows, early] = await Promise.all([
     q.query(`select e.*, u.name as recorded_by_name from trip_events e join users u on u.id = e.recorded_by
               where trip_id = any($1) order by e.id`, [ids]),
     q.query(`select m.*, u.name as author_name from trip_memos m join users u on u.id = m.author_id
@@ -77,6 +77,8 @@ async function loadTrips(where, params, q = db) {
     getSettings(q),
     teamIds.length ? q.query(`select t.id, t.team_id, t.driver_id, t.status, u.name from trips t join users u on u.id = t.driver_id
                                where t.team_id = any($1) order by t.id`, [teamIds]) : { rows: [] },
+    q.query(`select distinct on (e.trip_id) e.*, u.name as decided_by_name from early_start_requests e left join users u on u.id = e.decided_by
+              where e.trip_id = any($1) order by e.trip_id, e.id desc`, [ids]),
   ]);
   const now = new Date().toISOString();
   return trips.map((t) => {
@@ -105,6 +107,7 @@ async function loadTrips(where, params, q = db) {
       memos: memos.rows.filter((m) => m.trip_id === t.id)
         .map((m) => ({ id: m.id, note: m.note, author_name: m.author_name, created_at: m.created_at })),
       pending_corrections: pending,
+      early_start: earlyOf(early.rows.find((x) => x.trip_id === t.id)),
       flags, elapsed_min: elapsed,
       pay: pr
         ? { approved: true, recorded: pr.recorded_minutes, recognized: pr.recognized_minutes, ot: pr.ot_minutes,
@@ -116,6 +119,10 @@ async function loadTrips(where, params, q = db) {
     };
   });
 }
+
+// Latest early start request of a trip, as the screens show it
+const earlyOf = (x) => (x ? { id: x.id, status: x.status, reason: x.reason, decline_reason: x.decline_reason,
+  decided_by_name: x.decided_by_name || null, decided_at: x.decided_at, created_at: x.created_at } : null);
 
 // Logistics views count a team trip once: keep one row per team (the first one) and show both driver names.
 function collapseTeams(list) {
@@ -159,6 +166,7 @@ r.get('/me', wrap(async (req, res) => {
     must_change_pw: !!req.user.must_change_pw, demo: process.env.DEMO_LOGIN === 'true',
     demo_reset: req.user.roles.includes('admin') && db.demoResetAllowed(),
     perms: [...req.perms], pages: L.pagesFor(req.user.roles), csrf: req.user.csrf,
+    accept_early_min: Number((await getSettings()).accept_early_min) || 0,
   });
 }));
 
@@ -281,6 +289,8 @@ r.post('/trips', requireAny('dispatch.edit'), wrap(async (req, res) => {
     hours: num(b.planned_hours, 'estimated hours', { min: 0, max: 48, optional: true }),
     cargo: str(b.cargo_ref, 'cargo / PO number', { max: 100, optional: true }),
   };
+  // The scheduler saw the "already on a trip" warning and chose Create anyway
+  const confirmed = b.confirm === true;
   const out = await db.tx(async (q) => {
     for (const id of [driverId, driver2].filter(Boolean)) {
       const { rows: d } = await q.query(
@@ -292,6 +302,17 @@ r.post('/trips', requireAny('dispatch.edit'), wrap(async (req, res) => {
       if (!vt.length) throw new Bad('Pick a vehicle type from the list, or add it with the Add button.');
       v.vehicle_type = vt[0].name;
     }
+    // One trip at a time: warn when a driver (or the second driver) is on the road now, or already has an assigned trip
+    // whose time overlaps this one (any scheduler's). Locking the driver rows makes two schedulers booking at once take turns.
+    const drivers = [driverId, driver2].filter(Boolean);
+    await q.query('select id from users where id = any($1) order by id for update', [drivers]);
+    const { rows: open } = await q.query(
+      `select t.id, t.trip_no, t.driver_id, u.name as driver_name, t.status, t.planned_departure, t.planned_hours
+         from trips t join users u on u.id = t.driver_id
+        where t.driver_id = any($1) and t.status in ('dispatched','in_progress','returning') order by t.planned_departure, t.id`, [drivers]);
+    const conflicts = L.tripConflicts(open, v.planned, v.hours).map((t) => ({ trip_id: t.id, trip_no: t.trip_no, driver_id: t.driver_id, driver_name: t.driver_name,
+      status: t.status, planned_departure: t.planned_departure, planned_hours: t.planned_hours == null ? null : Number(t.planned_hours) }));
+    if (conflicts.length && !confirmed) throw new Bad(L.BUSY_MSG, 409, { code: 'driver_busy', conflicts });
     const { rows: [{ n }] } = await q.query(`select count(*)::int + 1 as n from trips where created_at::date = now()::date`);
     const tripNo = `T${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${String(n).padStart(3, '0')}`;
     const ins = (no, driver) => q.query(
@@ -299,12 +320,13 @@ r.post('/trips', requireAny('dispatch.edit'), wrap(async (req, res) => {
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning id, trip_no`,
       [no, driver, v.vehicle, v.vehicle_type, v.pickup, v.dest, v.planned, v.hours, v.cargo, req.user.id]).then((x) => x.rows[0]);
     const t = await ins(tripNo, driverId);
-    await audit(q, req, 'trip.create', 'trip', t.id, { trip_no: t.trip_no, driver_id: driverId, ...v });
+    const warned = conflicts.length ? { created_despite: conflicts.map((c) => c.trip_no) } : {};
+    await audit(q, req, 'trip.create', 'trip', t.id, { trip_no: t.trip_no, driver_id: driverId, ...v, ...warned });
     if (driver2) {
       // Team trip: a second row for the second driver, linked to the first (trip number gets -B)
       const t2 = await ins(`${tripNo}-B`, driver2);
       await q.query('update trips set team_id = $1 where id in ($1, $2)', [t.id, t2.id]);
-      await audit(q, req, 'trip.create', 'trip', t2.id, { trip_no: t2.trip_no, driver_id: driver2, team_with: t.id, ...v });
+      await audit(q, req, 'trip.create', 'trip', t2.id, { trip_no: t2.trip_no, driver_id: driver2, team_with: t.id, ...v, ...warned });
       t.team_trip_id = t2.id;
     }
     // Every address used in Dispatch is saved to the address book automatically
@@ -417,11 +439,19 @@ r.post('/trips/:id/events', requireAny('trip.own'), wrap(async (req, res) => {
       // Accept starts the pay clock, so it only opens shortly before the planned departure (server clock)
       const opens = L.acceptOpensAt(t.planned_departure, await getSettings(q));
       if (Date.now() < new Date(opens).getTime()) {
-        throw new Bad(`Accept opens at ${new Date(opens).toLocaleString('en-CA', { timeZone: process.env.TZ_DISPLAY || L.TIMEZONE, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}.`, 409);
+        // A Scheduler/Admin approved an early start for this trip: Accept is allowed now
+        const { rows: ok } = await q.query(`select 1 from early_start_requests where trip_id = $1 and status = 'approved'`, [id]);
+        if (!ok.length) throw new Bad(`Accept opens at ${new Date(opens).toLocaleString('en-CA', { timeZone: process.env.TZ_DISPLAY || L.TIMEZONE, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}. To leave early, ask your manager (Early start).`, 409);
       }
       const { rows: other } = await q.query(
         `select trip_no from trips where driver_id = $1 and id <> $2 and status in ('in_progress','returning')`, [t.driver_id, id]);
       if (other.length) throw new Bad(`You already have a trip in progress (${other[0].trip_no}).`, 409);
+      // Only the current trip (earliest not accepted) can be accepted; later trips wait until it is finished
+      const { rows: before } = await q.query(
+        `select trip_no from trips where driver_id = $1 and id <> $2 and status = 'dispatched'
+            and (planned_departure < $3 or (planned_departure = $3 and id < $2)) order by planned_departure, id limit 1`,
+        [t.driver_id, id, t.planned_departure]);
+      if (before.length) throw new Bad(`${L.FINISH_FIRST_MSG}: trip ${before[0].trip_no} comes before this one.`, 409);
     }
     const { rows: [e] } = await q.query(
       `insert into trip_events(trip_id, type, occurred_at, recorded_by, method) values ($1,$2,coalesce($4::timestamptz, now()),$3,'button') returning id, occurred_at`,
@@ -431,6 +461,65 @@ r.post('/trips/:id/events', requireAny('trip.own'), wrap(async (req, res) => {
     return { status, occurred_at: e.occurred_at };
   });
   res.json(out);
+}));
+
+// ---------- early start (v0.8.2) ----------
+// Accept opens a few minutes before the planned start (Settings). A driver who must leave earlier asks here;
+// a Scheduler/Admin approves (the driver can then Accept right away) or declines. One open request per trip.
+r.post('/trips/:id/early-start', requireAny('trip.own'), wrap(async (req, res) => {
+  const id = int(req.params.id, 'id', { min: 1 });
+  const reason = str((req.body || {}).reason, 'a reason', { max: 300, optional: true });
+  const out = await db.tx(async (q) => {
+    const { rows: [t] } = await q.query('select * from trips where id = $1 for update', [id]);
+    if (!t || t.driver_id !== req.user.id) throw notFound();
+    if (t.status !== 'dispatched') throw new Bad('This trip is already accepted or closed.', 409);
+    if (Date.now() >= new Date(L.acceptOpensAt(t.planned_departure, await getSettings(q))).getTime()) throw new Bad('You can already accept this trip.', 409);
+    const { rows: mine } = await q.query(`select id, status, planned_departure from trips where driver_id = $1 and status in ('dispatched','in_progress','returning')`, [t.driver_id]);
+    const cur = L.currentTrip(mine);
+    if (!cur || cur.id !== t.id) throw new Bad(`${L.FINISH_FIRST_MSG}.`, 409);
+    const { rows: open } = await q.query(`select status from early_start_requests where trip_id = $1 and status in ('pending','approved')`, [id]);
+    if (open.length) throw new Bad(open[0].status === 'approved' ? 'Early start is already approved. You can accept now.' : 'Early start is already requested. Waiting for your manager.', 409);
+    const { rows: [e] } = await q.query('insert into early_start_requests(trip_id, requested_by, reason) values ($1,$2,$3) returning id', [id, req.user.id, reason]);
+    await audit(q, req, 'early_start.request', 'trip', id, { request_id: e.id, reason });
+    return { id: e.id, trip_no: t.trip_no, planned: t.planned_departure };
+  });
+  const startTxt = new Date(out.planned).toLocaleString('en-CA', { timeZone: L.TIMEZONE, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+  await N.safeNotify(N.usersWith(['dispatch.edit'], [req.user.id]), { kind: 'early', title: 'Early start request',
+    body: `${req.user.name} · trip ${out.trip_no} (planned ${startTxt})${reason ? ' · ' + reason : ''}`, link: '#dispatch', key: `early1:${out.id}` });
+  res.status(201).json({ id: out.id, status: 'pending' });
+}));
+
+r.get('/early-starts', requireAny('dispatch.view', 'dispatch.edit'), wrap(async (req, res) => {
+  const { rows } = await db.query(
+    `select e.id, e.trip_id, e.status, e.reason, e.decline_reason, e.created_at, e.decided_at, t.trip_no, t.planned_departure, t.status as trip_status,
+            t.pickup_location, t.destination, d.name as driver_name, b.name as decided_by_name
+       from early_start_requests e join trips t on t.id = e.trip_id join users d on d.id = t.driver_id left join users b on b.id = e.decided_by
+      where (e.status = 'pending' and t.status = 'dispatched') or e.decided_at > now() - interval '2 days'
+      order by (e.status = 'pending') desc, e.id desc limit 100`);
+  res.json(rows);
+}));
+
+r.post('/early-starts/:id', requireAny('dispatch.edit'), wrap(async (req, res) => {
+  const id = int(req.params.id, 'id', { min: 1 });
+  const b = req.body || {};
+  const approve = b.approve === true;
+  const why = approve ? null : str(b.reason, 'a reason', { max: 300, optional: true });
+  const out = await db.tx(async (q) => {
+    const { rows: [e] } = await q.query('select * from early_start_requests where id = $1 for update', [id]);
+    if (!e) throw notFound();
+    if (e.status !== 'pending') throw new Bad('This request was already handled.', 409);
+    if (e.requested_by === req.user.id) throw new Bad('You cannot approve your own request.', 403);
+    const { rows: [t] } = await q.query('select id, trip_no, driver_id, status from trips where id = $1 for update', [e.trip_id]);
+    if (t.status !== 'dispatched') throw new Bad('This trip is no longer waiting to be accepted.', 409);
+    await q.query(`update early_start_requests set status = $2, decided_by = $3, decided_at = now(), decline_reason = $4 where id = $1`,
+      [id, approve ? 'approved' : 'declined', req.user.id, why]);
+    await audit(q, req, approve ? 'early_start.approve' : 'early_start.decline', 'trip', t.id, { request_id: id, reason: why });
+    return { t, status: approve ? 'approved' : 'declined' };
+  });
+  await N.safeNotify([out.t.driver_id], approve
+    ? { kind: 'early', title: 'Early start approved', body: `Trip ${out.t.trip_no}: you can accept it now.`, link: '#my', key: `early2:${id}` }
+    : { kind: 'early', title: 'Early start declined', body: `Trip ${out.t.trip_no}${why ? ' · ' + why : ''}. Accept opens at the usual time.`, link: '#my', key: `early2:${id}` });
+  res.json({ status: out.status });
 }));
 
 // ---------- receiving ----------

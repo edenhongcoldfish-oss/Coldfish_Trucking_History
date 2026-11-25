@@ -194,6 +194,21 @@ create table addresses (
 );
 create unique index addresses_lower on addresses (lower(address));
 
+-- Early start: a driver asks to accept a trip before the accept window opens; a Scheduler/Admin approves or declines (v0.8.2)
+create table if not exists early_start_requests (
+  id            serial primary key,
+  trip_id       int not null references trips(id),
+  requested_by  int not null references users(id),
+  reason        text check (reason is null or length(reason) <= 300),
+  status        text not null default 'pending' check (status in ('pending','approved','declined')),
+  decided_by    int references users(id),
+  decided_at    timestamptz,
+  decline_reason text check (decline_reason is null or length(decline_reason) <= 300),
+  created_at    timestamptz not null default now()
+);
+create index if not exists early_start_trip on early_start_requests(trip_id);
+create unique index if not exists early_start_one_open on early_start_requests(trip_id) where status = 'pending';
+
 -- Notifications (bell) and Web Push subscriptions
 create table if not exists notifications (
   id          serial primary key,

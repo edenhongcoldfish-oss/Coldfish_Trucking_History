@@ -68,7 +68,7 @@ async function main() {
   // Error responses never include internals (stack traces, SQL)
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
-    if (err.expose) return res.status(err.status || 400).json({ error: err.message });
+    if (err.expose) return res.status(err.status || 400).json({ ...(err.extra || {}), error: err.message });
     if (err.type === 'entity.parse.failed' || err.type === 'entity.too.large') return res.status(400).json({ error: 'Invalid request.' });
     console.error(err);
     res.status(500).json({ error: 'Something went wrong on the server. Please try again shortly.' });

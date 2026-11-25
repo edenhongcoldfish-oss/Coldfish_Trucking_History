@@ -94,6 +94,20 @@ create table if not exists holiday_pay (
     create table if not exists vehicle_types (
       id serial primary key, name text not null check (length(name) between 1 and 40), created_at timestamptz not null default now());
     create unique index if not exists vehicle_types_lower on vehicle_types (lower(name));
+    -- v0.8.2: early start requests
+    create table if not exists early_start_requests (
+      id            serial primary key,
+      trip_id       int not null references trips(id),
+      requested_by  int not null references users(id),
+      reason        text check (reason is null or length(reason) <= 300),
+      status        text not null default 'pending' check (status in ('pending','approved','declined')),
+      decided_by    int references users(id),
+      decided_at    timestamptz,
+      decline_reason text check (decline_reason is null or length(decline_reason) <= 300),
+      created_at    timestamptz not null default now()
+    );
+    create index if not exists early_start_trip on early_start_requests(trip_id);
+    create unique index if not exists early_start_one_open on early_start_requests(trip_id) where status = 'pending';
 create table if not exists notifications (
   id          serial primary key,
   user_id     int not null references users(id),

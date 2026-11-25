@@ -6,7 +6,7 @@
   const KEY = 'trucking-demo-v9-en';
   const H = 3600000;
   const iso = (ms) => new Date(ms).toISOString();
-  class E extends Error { constructor(m) { super(m); } }
+  class E extends Error { constructor(m, status, data) { super(m); if (status) { this.status = status; this.data = Object.assign({ error: m }, data); } } }
 
   function saveAddr(s, text) {
     const a = String(text || '').trim().replace(/\s+/g, ' ');
@@ -136,6 +136,7 @@
       receipt: eff.receipt ? eff.receipt.data : null,
       events: events.map((e) => Object.assign({}, e, { recorded_by_name: user(e.recorded_by).name })),
       memos: S.memos.filter((m) => m.trip_id === t.id).map((m) => Object.assign({}, m, { author_name: user(m.author_id).name })),
+      early_start: (() => { const e = (S.early || []).filter((x) => x.trip_id === t.id).pop(); return e ? Object.assign({}, e, { decided_by_name: e.decided_by ? user(e.decided_by).name : null }) : null; })(),
       pending_corrections: S.corrections.filter((c) => c.trip_id === t.id && ['pending', 'first_approved'].includes(c.status)).length,
       flags, elapsed_min: elapsed,
       driver_rate: user(t.driver_id).hourly_rate == null ? null : user(t.driver_id).hourly_rate,
@@ -214,7 +215,7 @@
       if (!u || !u.active || b.password !== 'demo1234!!') throw new E('Incorrect username or password.');
       me = u; audit('login', 'user', u.id); return { ok: true };
     }],
-    ['GET', /^\/me$/, () => { if (!me) throw new E('Please sign in.'); return { app_version: L.APP_VERSION, user: me, perms: [...perms()], pages: L.pagesFor(me.roles), csrf: 'demo', demo: true, demo_reset: me.roles.includes('admin'), must_change_pw: false }; }],
+    ['GET', /^\/me$/, () => { if (!me) throw new E('Please sign in.'); return { app_version: L.APP_VERSION, user: me, perms: [...perms()], pages: L.pagesFor(me.roles), csrf: 'demo', demo: true, demo_reset: me.roles.includes('admin'), must_change_pw: false, accept_early_min: Number(S.settings.accept_early_min) || 0 }; }],
     ['POST', /^\/admin\/demo-reset$/, (m, b) => { need('users.manage'); if (b.confirm !== 'RESET') throw new E('Please confirm the reset.'); S = fresh(); save(); me = null; return { ok: true }; }],
     ['POST', /^\/me\/password$/, (m, b) => { if (b.current_password !== 'demo1234!!') throw new E('The current password is not correct.'); if (!b.new_password || b.new_password.length < 10) throw new E('Please enter a new password (10+ characters).'); return { ok: true, note: 'demo' }; }],
     ['GET', /^\/notifications$/, () => {
@@ -261,6 +262,11 @@
       if (d2 && d2.id === d.id) throw new E('Pick two different drivers for a team trip.');
       const vt = b.vehicle_type ? S.vehicleTypes.find((x) => x.name.toLowerCase() === String(b.vehicle_type).toLowerCase()) : null;
       if (b.vehicle_type && !vt) throw new E('Pick a vehicle type from the list, or add it with the Add button.');
+      // One trip at a time (same rule as the server): warn unless the scheduler chose Create anyway
+      const hours = b.planned_hours ? Number(b.planned_hours) : null;
+      const conflicts = [d, d2].filter(Boolean).flatMap((u) => L.tripConflicts(S.trips.filter((x) => x.driver_id === u.id), b.planned_departure, hours)
+        .map((x) => ({ trip_id: x.id, trip_no: x.trip_no, driver_id: u.id, driver_name: u.name, status: x.status, planned_departure: x.planned_departure, planned_hours: x.planned_hours })));
+      if (conflicts.length && b.confirm !== true) throw new E(L.BUSY_MSG, 409, { code: 'driver_busy', conflicts });
       const t = { id: ++S.seq, vehicle_type: vt ? vt.name : null, trip_no: `T${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${String(S.trips.length + 1).padStart(3, '0')}`, driver_id: d.id,
         vehicle: nonEmpty(b.vehicle, 'vehicle'), pickup_location: nonEmpty(b.pickup_location, 'pickup location'), destination: nonEmpty(b.destination, 'destination'),
         planned_departure: nonEmpty(b.planned_departure, 'planned departure'), planned_hours: b.planned_hours ? Number(b.planned_hours) : null,
@@ -283,12 +289,42 @@
     ['POST', /^\/trips\/(\d+)\/events$/, (m, b) => {
       need('trip.own'); const t = tripOr404(Number(m[1]), true);
       if (!(L.ALLOWED_EVENTS[t.status] || []).includes(b.type)) throw new E(`You can't press '${L.BUTTON_LABELS[b.type] || b.type}' now.`);
-      if (b.type === 'depart' && Date.now() < new Date(L.acceptOpensAt(t.planned_departure, S.settings)).getTime()) throw new E(`Accept opens ${S.settings.accept_early_min} min before the planned departure.`);
+      if (b.type === 'depart' && Date.now() < new Date(L.acceptOpensAt(t.planned_departure, S.settings)).getTime() && !(S.early || []).some((x) => x.trip_id === t.id && x.status === 'approved')) throw new E(`Accept opens ${S.settings.accept_early_min} min before the planned departure.`);
       if (b.type === 'depart' && S.trips.some((x) => x.driver_id === t.driver_id && x.id !== t.id && ['in_progress', 'returning'].includes(x.status))) throw new E('You already have a trip in progress.');
+      if (b.type === 'depart' && L.currentTrip(S.trips.filter((x) => x.driver_id === t.driver_id)) !== t) throw new E(`${L.FINISH_FIRST_MSG}.`);
       const tapped = b.at ? new Date(b.at).getTime() : NaN; // tap time from the 10-second undo window, accepted only if under 2 minutes old
       const at = Number.isFinite(tapped) && tapped <= Date.now() + 5000 && tapped >= Date.now() - 120000 ? new Date(Math.min(tapped, Date.now())).toISOString() : new Date().toISOString();
       S.events.push({ id: ++S.seq, trip_id: t.id, type: b.type, occurred_at: at, recorded_by: me.id, method: 'button', data: {}, created_at: new Date().toISOString() });
       recompute(t); audit('trip.event', 'trip', t.id, { type: b.type }); return { status: t.status };
+    }],
+    // Early start (same rules as the server)
+    ['POST', /^\/trips\/(\d+)\/early-start$/, (m, b) => {
+      need('trip.own'); const t = tripOr404(Number(m[1]), true); S.early = S.early || [];
+      if (t.status !== 'dispatched') throw new E('This trip is already accepted or closed.');
+      if (Date.now() >= new Date(L.acceptOpensAt(t.planned_departure, S.settings)).getTime()) throw new E('You can already accept this trip.');
+      if (L.currentTrip(S.trips.filter((x) => x.driver_id === t.driver_id)) !== t) throw new E(`${L.FINISH_FIRST_MSG}.`);
+      if (S.early.some((x) => x.trip_id === t.id && x.status !== 'declined')) throw new E('Early start is already requested.');
+      const e = { id: ++S.seq, trip_id: t.id, requested_by: me.id, reason: b.reason || null, status: 'pending', created_at: new Date().toISOString() };
+      S.early.push(e); audit('early_start.request', 'trip', t.id, { reason: e.reason });
+      notify(S.users.filter((u) => L.permsFor(u.roles).has('dispatch.edit')).map((u) => u.id), { kind: 'early', title: 'Early start request', body: `${me.name} · trip ${t.trip_no}`, link: '#dispatch', key: `early1:${e.id}` });
+      return { id: e.id, status: 'pending' };
+    }],
+    ['GET', /^\/early-starts$/, () => {
+      need('dispatch.view', 'dispatch.edit');
+      return (S.early || []).filter((e) => e.status === 'pending' ? tripOr404(e.trip_id).status === 'dispatched' : Date.now() - new Date(e.decided_at).getTime() < 2 * 864e5)
+        .map((e) => { const t = tripOr404(e.trip_id); return Object.assign({}, e, { trip_no: t.trip_no, planned_departure: t.planned_departure, driver_name: user(t.driver_id).name, decided_by_name: e.decided_by ? user(e.decided_by).name : null }); })
+        .sort((a, b) => (a.status === 'pending' ? 0 : 1) - (b.status === 'pending' ? 0 : 1) || b.id - a.id);
+    }],
+    ['POST', /^\/early-starts\/(\d+)$/, (m, b) => {
+      need('dispatch.edit'); const e = (S.early || []).find((x) => x.id === Number(m[1]));
+      if (!e) throw new E('Not found.');
+      if (e.status !== 'pending') throw new E('This request was already handled.');
+      const t = tripOr404(e.trip_id);
+      if (t.status !== 'dispatched') throw new E('This trip is no longer waiting to be accepted.');
+      Object.assign(e, { status: b.approve === true ? 'approved' : 'declined', decided_by: me.id, decided_at: new Date().toISOString(), decline_reason: b.approve === true ? null : (b.reason || null) });
+      audit(b.approve === true ? 'early_start.approve' : 'early_start.decline', 'trip', t.id, {});
+      notify([t.driver_id], { kind: 'early', title: b.approve === true ? 'Early start approved' : 'Early start declined', body: `Trip ${t.trip_no}`, link: '#my', key: `early2:${e.id}` });
+      return { status: e.status };
     }],
     ['POST', /^\/trips\/(\d+)\/receipt$/, (m, b) => {
       need('receipt.edit'); const t = tripOr404(Number(m[1]));
