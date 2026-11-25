@@ -1,0 +1,24 @@
+# Render Blueprint: free-tier DEMO deployment (sample data only, no real data).
+# Not for production: free instances sleep when idle and the demo data resets.
+services:
+  - type: web
+    name: coldfish-trucking-demo
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DEMO_LOGIN
+        value: "true"
+      - key: SEED_DEMO
+        value: "true"
+      - key: TZ
+        value: America/Toronto
