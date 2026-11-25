@@ -2,7 +2,7 @@
    Data (/api) is never cached, so screens always show live numbers. App files are network-first,
    so a new version shows up as soon as the phone is online. */
 'use strict';
-const CACHE = 'triplog-shell-v4';
+const CACHE = 'triplog-shell-v5';
 const SHELL = ['/', '/index.html', '/app.js', '/style.css', '/shared/logic.js', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

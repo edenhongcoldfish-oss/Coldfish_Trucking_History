@@ -391,3 +391,13 @@ label.f .hint{font-weight:500;font-size:.74rem;color:var(--muted)}
 .early-note.bad{color:var(--bad, #b42318)}
 .early-requests{margin-bottom:14px}
 .early-requests h2{display:flex;align-items:center;gap:6px;margin-top:0}
+/* v0.8.3: Early start requests menu badge, Trucks page */
+.nav-list a .nav-badge,.bottom a .nav-badge{margin-left:auto;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:var(--bad);color:#fff;font-size:.7rem;font-weight:700;display:inline-flex;align-items:center;justify-content:center}
+.nav-badge[hidden]{display:none!important}
+.bottom a{position:relative}.bottom a .nav-badge{position:absolute;top:2px;right:18%;margin:0}
+.early-link{display:flex;align-items:center;gap:8px;flex-wrap:wrap;text-decoration:none;color:inherit;border-left:4px solid var(--info);margin-bottom:14px}
+.addr.off{opacity:.6}
+.addr .row select{max-width:160px}
+.truck-add input{flex:1 1 auto;min-width:0}.truck-add select{flex:0 0 150px;width:150px}
+.addr .row{flex-wrap:nowrap}
+@media(max-width:560px){.truck-add{flex-wrap:wrap}.truck-add input{flex-basis:100%}.addr .row{flex-wrap:wrap}}

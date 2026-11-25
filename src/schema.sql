@@ -47,6 +47,17 @@ create table vehicle_types (
 create unique index vehicle_types_lower on vehicle_types (lower(name));
 insert into vehicle_types(name) values ('10 ton truck'), ('5 ton truck');
 
+-- Company trucks by licence plate (v0.8.3). Assign trips picks from this list; trips keep the plate text as it was.
+create table trucks (
+  id           serial primary key,
+  plate        text not null check (length(plate) between 1 and 20),
+  vehicle_type text,
+  active       boolean not null default true,
+  created_by   int references users(id),
+  created_at   timestamptz not null default now()
+);
+create unique index trucks_plate_lower on trucks (lower(plate));
+
 create table trips (
   id                 serial primary key,
   trip_no            text not null unique,

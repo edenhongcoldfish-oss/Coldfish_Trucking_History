@@ -6,7 +6,7 @@
   'use strict';
 
   // Bump on every release. The browser compares it with the server's copy to spot a server that was not restarted.
-  const APP_VERSION = '0.8.2';
+  const APP_VERSION = '0.8.3';
   // Main species shown as quick picks in Receiving (anything else goes under Other)
   const MAIN_SPECIES = ['Black Cod', 'Halibut', 'Salmon'];
   // Receiving: average weight of one packing unit, used to count cases/totes from the total weight.
@@ -77,6 +77,7 @@
     { id: 'today', label: 'Today', any: ['dispatch.edit', 'board.view', 'receipt.edit', 'correction.first', 'correction.final', 'pay.approve', 'payout.edit'] },
     { id: 'my', label: 'My Trips', any: ['trip.own'] },
     { id: 'dispatch', label: 'Assign trips', any: ['dispatch.view', 'dispatch.edit'] },
+    { id: 'early', label: 'Early start requests', any: ['dispatch.view', 'dispatch.edit'] },
     { id: 'board', label: 'Live trips', any: ['board.view'] },
     { id: 'receipt', label: 'Receiving', any: ['receipt.view', 'receipt.edit'] },
     { id: 'corrections', label: 'Time corrections', any: ['correction.view', 'correction.first', 'correction.final'] },
@@ -88,6 +89,7 @@
     { id: 'users', label: 'Users & roles', any: ['users.manage'] },
     { id: 'payhist', label: 'Pay History', any: ['payhist.view'] },
     { id: 'addresses', label: 'Saved addresses', any: ['dispatch.edit'] },
+    { id: 'trucks', label: 'Trucks', any: ['dispatch.edit'] },
     { id: 'audit', label: 'Activity log', any: ['audit.view'] },
   ];
   function pagesFor(roles) {
@@ -127,6 +129,9 @@
     return new Date(new Date(plannedDeparture).getTime() - (Number(s.accept_early_min) || 0) * 60000).toISOString();
   }
   const STATUS_AFTER = { depart: 'in_progress', pickup_done: 'returning', return: 'returned' };
+  // Licence plate as stored in the truck list: trimmed, upper case, single spaces
+  const normPlate = (v) => String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toUpperCase();
+
   // ---------- one trip at a time (v0.8.1) ----------
   // A driver can only drive one trip at a time. A trip with no estimate is counted as this many hours for overlap checks.
   const DEFAULT_TRIP_HOURS = 8;
@@ -512,7 +517,7 @@
           .map((t) => tripLine(t, `planned ${new Date(t.planned_departure).toLocaleTimeString('en-CA', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false })}`)));
     }
     if (has('dispatch.edit')) {
-      add('early', 'Early start requests', 'A driver asks to accept before the accept window opens.', 'info', 'dispatch',
+      add('early', 'Early start requests', 'A driver asks to accept before the accept window opens.', 'info', 'early',
         ctx.trips.filter((t) => t.status === 'dispatched' && t.early_start && t.early_start.status === 'pending')
           .map((t) => tripLine(t, `planned ${new Date(t.planned_departure).toLocaleTimeString('en-CA', { timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false })}`)));
     }
@@ -552,7 +557,7 @@
     payHistoryRows,
     APP_VERSION, MAIN_SPECIES, PACK_UNITS, LB_PER_TONNE, countFromWeight, lbOf, countText, orderOk, ROLES, ROLE_PERMS, ALL_PERMS, PAGES, EVENT_LABELS, BUTTON_LABELS, DRIVER_EVENTS, STATUS_LABELS, NEXT_EVENT,
     ALLOWED_EVENTS, ACTIVE_STATUSES, acceptOpensAt,
-    DEFAULT_TRIP_HOURS, RUNNING_STATUSES, tripWindow, tripConflicts, BUSY_MSG, currentTrip, FINISH_FIRST_MSG,
+    normPlate, DEFAULT_TRIP_HOURS, RUNNING_STATUSES, tripWindow, tripConflicts, BUSY_MSG, currentTrip, FINISH_FIRST_MSG,
     STATUS_AFTER, DEFAULT_SETTINGS, permsFor, can, pagesFor, minutesBetween, roundMinutes,
     computePay, effectiveTimes, flags,
   };

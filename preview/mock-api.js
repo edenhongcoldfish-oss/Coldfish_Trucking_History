@@ -221,7 +221,8 @@
     ['GET', /^\/notifications$/, () => {
       watchLongTrips();
       const mine = (S.notes || []).filter((n) => n.user_id === me.id).sort((a, b) => b.id - a.id);
-      return { unread: mine.filter((n) => !n.read_at).length, items: mine.slice(0, 30) };
+      const early = perms().has('dispatch.edit') || perms().has('dispatch.view') ? (S.early || []).filter((e) => e.status === 'pending' && tripOr404(e.trip_id).status === 'dispatched').length : 0;
+      return { unread: mine.filter((n) => !n.read_at).length, items: mine.slice(0, 30), early_pending: early };
     }],
     ['POST', /^\/notifications\/read$/, () => { (S.notes || []).forEach((n) => { if (n.user_id === me.id && !n.read_at) n.read_at = new Date().toISOString(); }); return { ok: true }; }],
     ['POST', /^\/push\/(subscribe|unsubscribe)$/, () => ({ ok: true })],
@@ -455,6 +456,26 @@
       const q = new URLSearchParams(m[1] || '');
       const list = range(q, S.trips).filter((t) => ['approved', 'paid'].includes(t.status));
       return L.payHistoryRows(sorted(list).map(dto), { fish: q.get('fish') || '', lot: q.get('lot') || '', sort: q.get('sort') || 'date' });
+    }],
+    // Trucks by licence plate (first use: filled from the plates on the sample trips)
+    ['GET', /^\/trucks$/, () => {
+      need('dispatch.view', 'dispatch.edit');
+      if (!S.trucks) { S.trucks = []; S.trips.forEach((t) => { const p = L.normPlate(t.vehicle); if (p && !S.trucks.some((k) => k.plate === p)) S.trucks.push({ id: ++S.seq, plate: p, vehicle_type: t.vehicle_type || null, active: true }); }); }
+      return S.trucks.map((k) => Object.assign({}, k, { trips: S.trips.filter((t) => L.normPlate(t.vehicle) === k.plate).length }))
+        .sort((a, b) => (b.active - a.active) || a.plate.localeCompare(b.plate));
+    }],
+    ['POST', /^\/trucks$/, (m, b) => {
+      need('dispatch.edit'); S.trucks = S.trucks || [];
+      const plate = L.normPlate(b.plate); if (!plate) throw new E('Please enter a licence plate.');
+      if (S.trucks.some((k) => k.plate === plate)) throw new E('That plate is already in the list.');
+      const k = { id: ++S.seq, plate, vehicle_type: b.vehicle_type || null, active: true }; S.trucks.push(k); audit('truck.add', 'truck', k.id, { plate }); return k;
+    }],
+    ['POST', /^\/trucks\/(\d+)$/, (m, b) => {
+      need('dispatch.edit'); const k = (S.trucks || []).find((x) => x.id === Number(m[1])); if (!k) throw new E('Not found.');
+      if (b.plate !== undefined) { const p = L.normPlate(b.plate); if (!p) throw new E('Please enter a licence plate.'); if (S.trucks.some((x) => x.plate === p && x !== k)) throw new E('That plate is already in the list.'); k.plate = p; }
+      if (b.vehicle_type !== undefined) k.vehicle_type = b.vehicle_type || null;
+      if (b.active !== undefined) k.active = b.active === true;
+      audit('truck.edit', 'truck', k.id, {}); return k;
     }],
     ['GET', /^\/vehicle-types$/, () => { need('dispatch.view', 'dispatch.edit'); return S.vehicleTypes; }],
     ['POST', /^\/vehicle-types$/, (m, b) => {

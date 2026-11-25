@@ -80,7 +80,12 @@ long trip, Finish/receiving mismatch, open correction.
 ## Early start (v0.8.2)
 - Drivers can press Accept a few minutes before the planned start (Settings, "Accept opens before planned start", 15 min by default). Assign trips shows this under Planned start.
 - Before that, the driver's Current trip card says "You can accept 15 minutes before the start time. To leave early, ask your manager." with an **Early start** button (optional reason). One open request per trip.
-- Schedulers and Admins see **Early start requests** at the top of Assign trips (and on Today) and press **Approve** or **Decline** (optional reason). Approve lets the driver accept right away; the driver is notified either way and can ask again after a decline. Requests and decisions are in the audit log.
+- Schedulers and Admins open **Early start requests** in the menu (red count badge when some are waiting; also on Today and in notifications) and press **Approve** or **Decline** (optional reason). Approve lets the driver accept right away; the driver is notified either way and can ask again after a decline. Requests and decisions are in the audit log.
+
+## Trucks by licence plate (v0.8.3)
+- **Trucks** (menu, Scheduler/Admin): the company's trucks by licence plate, each optionally linked to a vehicle type. Add, edit the plate, change the type, or turn a truck off/on. Plates are stored in upper case.
+- **Assign trips** picks the truck from this list (Truck (licence plate) dropdown, with an **Add** button). Picking a truck fills in its vehicle type. The server only accepts active trucks from the list.
+- Trips keep the plate text they were assigned with, so renaming or turning off a truck never changes history. On the first start of v0.8.3 the list is filled from the plates already used on trips (turn off any test entries).
 
 ## Accounts and sign-in
 

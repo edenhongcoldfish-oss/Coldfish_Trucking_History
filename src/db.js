@@ -6,6 +6,8 @@ const path = require('path');
 
 let impl;
 // Fills the address book from addresses already used on trips
+// v0.8.3: first start with the truck list fills it from the plates already used on trips
+const BACKFILL_TRUCKS = `insert into trucks(plate, vehicle_type) select distinct on (left(upper(trim(vehicle)), 20)) left(upper(trim(vehicle)), 20), vehicle_type from trips where trim(vehicle) <> '' order by left(upper(trim(vehicle)), 20), id desc on conflict do nothing;`;
 const BACKFILL_ADDRESSES = `insert into addresses(address, use_count, last_used)
   select min(a), count(*), max(c) from (select pickup_location a, created_at c from trips
     union all select destination, created_at from trips) x group by lower(a) on conflict do nothing;`;
@@ -138,6 +140,17 @@ create table if not exists push_subs (
   // Default vehicle types only when the list has never had any entry (the admin may add more later)
   await impl.exec(`insert into vehicle_types(name) select x from (values ('10 ton truck'), ('5 ton truck')) v(x)
     where not exists (select 1 from vehicle_types) and not exists (select 1 from trips where vehicle_type is not null)`);
+  const { rows: [tk] } = await impl.query("select to_regclass('public.trucks') is not null as ok");
+  if (!tk.ok) await impl.exec(`create table trucks (
+      id           serial primary key,
+      plate        text not null check (length(plate) between 1 and 20),
+      vehicle_type text,
+      active       boolean not null default true,
+      created_by   int references users(id),
+      created_at   timestamptz not null default now()
+    );
+    create unique index trucks_plate_lower on trucks (lower(plate));
+    ${BACKFILL_TRUCKS}`);
   const { rows: [ab] } = await impl.query("select to_regclass('public.addresses') is not null as ok");
   if (!ab.ok) {
     // First start after the address book was added: create it and fill it from existing trips
@@ -167,6 +180,7 @@ async function wipeForDemo() {
 
 module.exports = {
   BACKFILL_ADDRESSES,
+  BACKFILL_TRUCKS,
   init,
   demoResetAllowed,
   wipeForDemo,

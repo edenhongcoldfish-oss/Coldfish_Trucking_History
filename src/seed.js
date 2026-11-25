@@ -107,6 +107,7 @@ async function seed() {
     await q.query(`insert into trip_memos(trip_id, author_id, note) select id, $1, $2 from trips where trip_no = 'T-DEMO-009'`,
       [ids.logistics, 'Waited 3 h for loading at Ucluelet (dock delay confirmed)']);
     await q.query(require('./db').BACKFILL_ADDRESSES);
+    await q.query(require('./db').BACKFILL_TRUCKS); // demo trucks = the plates used on the sample trips
     await q.query(`insert into audit_log(user_id, action, entity, detail) values ($1,'seed','system','{"note":"demo data created"}')`, [ids.admin]);
     toApprove.push([p1, day(5, 10), 'EFT-24101', day(4, 15)], [p2, day(4, 10), 'EFT-24102', day(3, 15)],
       [p3, day(3, 10), 'EFT-24103', day(2, 15)], [a1, day(2, 10)]);

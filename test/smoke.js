@@ -87,7 +87,7 @@ function logicChecks() {
   const [admin, d1, d2, sch, log, rec, pay, acc] = await Promise.all(
     ['admin', 'driver1', 'driver2', 'scheduler', 'logistics', 'logistics', 'payer', 'accounting'].map((u) => session(u)));
 
-  check('admin sees every page', admin.me.pages.length === 15, admin.me.pages.length);
+  check('admin sees every page', admin.me.pages.length === 17, admin.me.pages.length);
   // Demo data shows every stage of the flow: assigned -> on trip -> finished -> received -> pay approved -> paid
   const seeded = (await admin.call('GET', '/trips?scope=history')).data.filter((t) => /^T-DEMO-/.test(t.trip_no));
   const stages = seeded.reduce((m, t) => (m[t.status] = (m[t.status] || 0) + 1, m), {});
@@ -133,6 +133,35 @@ function logicChecks() {
   check('SQL injection attempt -> 400', sqli.status === 400);
 
   // dispatch -> trip flow
+  // ---------- trucks by licence plate (v0.8.3) ----------
+  const trucks0 = (await sch.call('GET', '/trucks')).data;
+  check('truck list starts with the plates of the sample trips, with their type', trucks0.some((k) => k.plate === 'TRK-07' && k.vehicle_type === '10 ton truck' && k.active && k.trips > 0), trucks0);
+  check('drivers cannot read or change trucks -> 403', (await d1.call('GET', '/trucks')).status === 403 && (await d1.call('POST', '/trucks', { plate: 'X1' })).status === 403);
+  check('payroll cannot add a truck -> 403', (await pay.call('POST', '/trucks', { plate: 'X1' })).status === 403);
+  const addT = await sch.call('POST', '/trucks', { plate: '  trk-99 ', vehicle_type: '5 ton truck' });
+  check('scheduler adds a plate (stored upper case, trimmed)', addT.status === 201 && addT.data.plate === 'TRK-99' && addT.data.vehicle_type === '5 ton truck', addT.data);
+  check('same plate twice (any case) -> 409', (await sch.call('POST', '/trucks', { plate: 'Trk-99' })).status === 409);
+  check('bad plate characters -> 400, unknown vehicle type -> 400', (await sch.call('POST', '/trucks', { plate: 'AB<1>' })).status === 400 && (await sch.call('POST', '/trucks', { plate: 'ZZ-1', vehicle_type: 'Rocket' })).status === 400);
+  for (const plate of ['TRK-98', 'TRK-97', 'TRK-T1', 'TRK-OV', 'TMP-1']) await log.call('POST', '/trucks', { plate });
+  const farAt = new Date(Date.now() + 61 * 864e5).toISOString();
+  const noTruck = await sch.call('POST', '/trips', { driver_id: d2.me.user.id, vehicle: 'NOPE-1', pickup_location: 'P', destination: 'Company Yard', planned_departure: farAt, confirm: true });
+  check('trip with a plate not in the list -> 400', noTruck.status === 400 && /Pick a truck/.test(noTruck.data.error), noTruck.data);
+  const byPlate = await sch.call('POST', '/trips', { driver_id: d2.me.user.id, vehicle: 'trk-07', pickup_location: 'P', destination: 'Company Yard', planned_departure: farAt, planned_hours: 1, confirm: true });
+  const bp = (await sch.call('GET', `/trips/${byPlate.data.id}`)).data;
+  check('trip uses the stored plate and takes the truck\'s vehicle type when none is picked', bp.vehicle === 'TRK-07' && bp.vehicle_type === '10 ton truck', [bp.vehicle, bp.vehicle_type]);
+  const tmp1 = (await sch.call('GET', '/trucks')).data.find((k) => k.plate === 'TMP-1');
+  const old = await sch.call('POST', '/trips', { driver_id: d2.me.user.id, vehicle: 'TMP-1', pickup_location: 'P', destination: 'Company Yard', planned_departure: new Date(Date.now() + 62 * 864e5).toISOString(), planned_hours: 1, confirm: true });
+  check('rename a plate and link a vehicle type', (await sch.call('POST', `/trucks/${tmp1.id}`, { plate: 'TMP-2', vehicle_type: '5 ton truck' })).status === 200
+    && (await sch.call('GET', '/trucks')).data.some((k) => k.id === tmp1.id && k.plate === 'TMP-2' && k.vehicle_type === '5 ton truck'));
+  check('rename to a plate already in the list -> 409', (await sch.call('POST', `/trucks/${tmp1.id}`, { plate: 'TRK-07' })).status === 409);
+  check('old trips keep the plate they were assigned with', (await sch.call('GET', `/trips/${old.data.id}`)).data.vehicle === 'TMP-1');
+  check('turn a truck off: it can no longer be assigned', (await sch.call('POST', `/trucks/${tmp1.id}`, { active: false })).status === 200
+    && (await sch.call('POST', '/trips', { driver_id: d2.me.user.id, vehicle: 'TMP-2', pickup_location: 'P', destination: 'Company Yard', planned_departure: farAt, confirm: true })).status === 400);
+  check('turn it back on', (await sch.call('POST', `/trucks/${tmp1.id}`, { active: true })).status === 200 && (await sch.call('GET', '/trucks')).data.find((k) => k.id === tmp1.id).active === true);
+  check('active must be true/false', (await sch.call('POST', `/trucks/${tmp1.id}`, { active: 'no' })).status === 400);
+  check('truck changes are in the audit log', (await admin.call('GET', '/audit')).data.some((x) => x.action === 'truck.edit' && x.detail.before.plate === 'TMP-1'));
+  for (const id of [byPlate.data.id, old.data.id]) await sch.call('POST', `/trips/${id}/cancel`, { reason: 'test' });
+
   const later = await sch.call('POST', '/trips', { driver_id: d1.me.user.id, vehicle: 'TRK-98', pickup_location: 'Tomorrow Pickup', destination: 'Company Yard', planned_departure: new Date(Date.now() + 20 * 3600000).toISOString(), planned_hours: 5 });
   const acceptEarly = await d1.call('POST', `/trips/${later.data.id}/events`, { type: 'depart' });
   check('Accept the day before -> 409', acceptEarly.status === 409 && /Accept opens/.test(acceptEarly.data.error), acceptEarly.data);
@@ -180,7 +209,7 @@ function logicChecks() {
   check('tonnes is still kept for reports', i0.tonnes === 4.423 && i1.tonnes === 1.25, tr.receipt.items);
   check('second receipt -> 409', (await rec.call('POST', `/trips/${tid}/receipt`, { result: 'ok', items: [{ species: 'x', lot: 'y', tonnes: 1 }] })).status === 409);
   // Jaskaran (demo account `logistics`) also has the Scheduler role; a Logistics-only person has no Dispatch
-  check('Jaskaran: Logistics + Scheduler pages', JSON.stringify(log.me.pages.map((p) => p.id)) === '["today","dispatch","board","receipt","corrections","history","addresses"]', log.me.pages.map((p) => p.id));
+  check('Jaskaran: Logistics + Scheduler pages', JSON.stringify(log.me.pages.map((p) => p.id)) === '["today","dispatch","early","board","receipt","corrections","history","addresses","trucks"]', log.me.pages.map((p) => p.id));
   check('Jaskaran can assign trips (Scheduler role), still cannot approve pay', log.me.perms.includes('dispatch.edit') && (await log.call('POST', '/trips', {})).status === 400
     && (await log.call('POST', '/pay/1/approve', {})).status === 403);
   check('Logistics alone has no dispatch', !L.permsFor(['logistics']).has('dispatch.edit') && JSON.stringify(L.pagesFor(['logistics']).map((p) => p.id)) === '["today","receipt","history"]');
@@ -420,7 +449,9 @@ function logicChecks() {
   check('driver asks for an early start -> 201', es1.status === 201 && es1.data.status === 'pending', es1.data);
   check('only one open request per trip -> 409', (await d4.call('POST', `/trips/${cur4.id}/early-start`, {})).status === 409);
   check('still cannot accept while it is pending', (await d4.call('POST', `/trips/${cur4.id}/events`, { type: 'depart' })).status === 409);
-  check('scheduler is notified', (await sch.call('GET', '/notifications')).data.items.some((n) => n.title === 'Early start request' && n.link === '#dispatch'));
+  check('scheduler is notified (link opens Early start requests)', (await sch.call('GET', '/notifications')).data.items.some((n) => n.title === 'Early start request' && n.link === '#early'));
+  check('menu badge count: scheduler sees 1 waiting, drivers get 0', (await sch.call('GET', '/notifications')).data.early_pending === 1 && (await d4.call('GET', '/notifications')).data.early_pending === 0);
+  check('Today item opens the Early start requests page', (await sch.call('GET', '/today')).data.some((x) => x.key === 'early' && x.page === 'early'));
   check('Today lists the request for the scheduler', (await sch.call('GET', '/today')).data.some((x) => x.key === 'early' && x.list.some((y) => y.trip_id === cur4.id)));
   check('driver sees the request as waiting', (await d4.call('GET', `/trips/${cur4.id}`)).data.early_start.status === 'pending');
   const list1 = await sch.call('GET', '/early-starts');

@@ -84,7 +84,7 @@
     });
     return svg;
   }
-  const PAGE_ICON = { today: 'home', guide: 'help', my: 'route', dispatch: 'plus', board: 'board', receipt: 'box', corrections: 'edit', history: 'clock', pay: 'dollar', drivers: 'users', payout: 'cash', payhist: 'list', addresses: 'pin', settings: 'sliders', users: 'users', audit: 'shield' };
+  const PAGE_ICON = { early: 'play', trucks: 'truck', today: 'home', guide: 'help', my: 'route', dispatch: 'plus', board: 'board', receipt: 'box', corrections: 'edit', history: 'clock', pay: 'dollar', drivers: 'users', payout: 'cash', payhist: 'list', addresses: 'pin', settings: 'sliders', users: 'users', audit: 'shield' };
   const pageHead = (title, sub, ...actions) => h('div', { class: 'page-head' }, h('div', null, h('h1', null, title), sub ? h('p', { class: 'sub' }, sub) : null), actions.length ? h('div', { class: 'row' }, actions) : null);
   const emptyBox = (text, ic) => h('div', { class: 'card empty' }, icon(ic || 'inbox'), h('span', null, text));
   const statCard = (label, value, ic, tone, foot) => h('div', { class: 'card stat-card' }, h('div', { class: 'stat-ico ' + (tone || '') }, icon(ic)),
@@ -376,34 +376,74 @@
       onclick: () => { TAB_STATE[id] = k; route(); } }, `${label} (${list.length})`)));
   }
 
+  // ---------- page: Early start requests (Scheduler / Admin) ----------
+  // Drivers ask to accept before the accept window opens. Waiting ones first, then the last 7 days.
+  async function pageEarly(main) {
+    const list = await api('GET', '/early-starts');
+    refreshNotes(false); // keeps the menu badge in step after Approve / Decline
+    const open = list.filter((x) => x.status === 'pending');
+    main.append(pageHead('Early start requests', `Drivers can accept ${me.accept_early_min} minutes before the planned start. Here they ask to start earlier. Approve lets the driver accept right away; the driver is told either way.`));
+    const rows = (xs) => tripTable(xs.map((x) => Object.assign({}, x, { id: x.trip_id, req_id: x.id })), [
+      ['Driver', (x) => x.driver_name], ['Trip', (x) => x.trip_no], ['Planned start', (x) => fmtTime(x.planned_departure)], ['Reason', (x) => x.reason || '–'],
+      ['', (x) => x.status !== 'pending'
+        ? h('span', null, h('span', { class: 'chip ' + (x.status === 'approved' ? 'ok' : 'gray') }, `${x.status === 'approved' ? 'Approved' : 'Declined'}${x.decided_by_name ? ' · ' + x.decided_by_name : ''}`),
+          x.decline_reason ? h('div', { class: 'small muted' }, x.decline_reason) : null)
+        : can('dispatch.edit') ? h('span', { class: 'row gap4' },
+          h('button', { class: 'btn small primary', onclick: (e) => { e.stopPropagation(); act(() => api('POST', `/early-starts/${x.req_id}`, { approve: true }), 'Early start approved'); } }, 'Approve'),
+          h('button', { class: 'btn small', onclick: async (e) => {
+            e.stopPropagation();
+            const reason = await ask('Decline early start', { input: true, optional: true, ok: 'Decline', danger: true, text: 'The driver is told. Reason (optional):' });
+            if (reason !== null) act(() => api('POST', `/early-starts/${x.req_id}`, { approve: false, reason: reason || null }), 'Early start declined');
+          } }, 'Decline')) : h('span', { class: 'chip warn' }, 'Waiting')],
+      ['Asked', (x) => fmtTime(x.created_at)], ['Route', (x) => routeOf(x)],
+    ]);
+    main.append(h('h2', null, 'Waiting for a decision', h('span', { class: 'count' }, open.length)));
+    main.append(open.length ? rows(open) : emptyBox('No early start requests waiting.', 'clock'));
+    const done = list.filter((x) => x.status !== 'pending');
+    main.append(h('h2', null, 'Decided in the last 7 days', h('span', { class: 'count' }, done.length)));
+    main.append(done.length ? rows(done) : h('p', { class: 'sub' }, 'Nothing decided yet.'));
+  }
+
+  // ---------- page: Trucks (licence plates) ----------
+  async function pageTrucks(main) {
+    const [list, types] = await Promise.all([api('GET', '/trucks'), api('GET', '/vehicle-types').catch(() => [])]);
+    const typeSelect = (val) => h('select', { 'aria-label': 'Vehicle type' }, h('option', { value: '' }, 'No type'), types.map((x) => h('option', { value: x.name, selected: x.name === val || null }, x.name)));
+    const plate = h('input', { placeholder: 'Licence plate, e.g. AB1 23C', maxlength: 20, 'aria-label': 'New plate' });
+    const type = typeSelect('');
+    main.append(pageHead('Trucks', 'Your company trucks by licence plate. Assign trips offers the trucks that are on. Turning a truck off or renaming it never changes trips already assigned.'),
+      h('div', { class: 'card' }, h('h2', { class: 'mt0' }, icon('plus', 'sm'), 'Add a truck'), h('div', { class: 'input-row truck-add' }, plate, type,
+        h('button', { class: 'btn primary', onclick: () => act(() => api('POST', '/trucks', { plate: plate.value, vehicle_type: type.value || null }), 'Truck added') }, icon('plus', 'sm'), 'Add'))));
+    if (!list.length) return main.append(emptyBox('No trucks yet. Add your first plate above.', 'truck'));
+    main.append(h('div', { class: 'card addr-list' }, list.map((k) => {
+      const sel = typeSelect(k.vehicle_type);
+      sel.addEventListener('change', () => act(() => api('POST', `/trucks/${k.id}`, { vehicle_type: sel.value || null }), 'Vehicle type saved'));
+      return h('div', { class: 'addr' + (k.active ? '' : ' off') },
+        h('div', { class: 'addr-text' }, icon('truck', 'sm'), h('b', { class: 'mono' }, k.plate), k.active ? null : h('span', { class: 'chip gray' }, 'Off')),
+        h('span', { class: 'small muted' }, `${k.trips} trip${k.trips === 1 ? '' : 's'}`),
+        h('div', { class: 'row gap4' }, sel,
+          h('button', { class: 'btn small', onclick: async () => {
+            const v = await ask('Edit plate', { input: true, ok: 'Save', text: `${k.plate}. Trips already assigned keep the old plate.` });
+            if (v) act(() => api('POST', `/trucks/${k.id}`, { plate: v }), 'Plate updated');
+          } }, 'Edit'),
+          k.active ? h('button', { class: 'btn small danger', onclick: async () => {
+            if (await ask('Turn this truck off?', { ok: 'Turn off', danger: true, text: `${k.plate} will no longer be offered in Assign trips. Trips already assigned are not changed.` })) act(() => api('POST', `/trucks/${k.id}`, { active: false }), 'Truck turned off');
+          } }, 'Turn off') : h('button', { class: 'btn small', onclick: () => act(() => api('POST', `/trucks/${k.id}`, { active: true }), 'Truck turned on') }, 'Turn on')));
+    })));
+  }
+
   // ---------- page: Dispatch ----------
   async function pageDispatch(main) {
     main.append(pageHead('Assign trips', 'New trips show up right away on the driver\'s My Trips page. The driver can press Accept from shortly before the planned departure.'));
-    // Early start requests from drivers: shown here only while there is something to handle (or just handled)
-    const early = await api('GET', '/early-starts').catch(() => []);
-    if (early.length) {
-      const open = early.filter((x) => x.status === 'pending');
-      main.append(h('div', { class: 'card early-requests' },
-        h('h2', null, icon('clock', 'sm'), 'Early start requests', h('span', { class: 'count' }, open.length)),
-        h('p', { class: 'sub mt0' }, 'Drivers asking to accept before the accept window opens. Approve lets the driver accept right away.'),
-        tripTable(early.map((x) => Object.assign({}, x, { id: x.trip_id, req_id: x.id })), [
-          ['Driver', (x) => x.driver_name], ['Trip', (x) => x.trip_no], ['Planned', (x) => fmtTime(x.planned_departure)],
-          ['Reason', (x) => x.reason || '–'],
-          ['', (x) => x.status !== 'pending' ? h('span', { class: 'chip ' + (x.status === 'approved' ? 'ok' : 'gray') }, `${x.status === 'approved' ? 'Approved' : 'Declined'}${x.decided_by_name ? ' · ' + x.decided_by_name : ''}`)
-            : can('dispatch.edit') ? h('span', { class: 'row gap4' },
-              h('button', { class: 'btn small primary', onclick: (e) => { e.stopPropagation(); act(() => api('POST', `/early-starts/${x.req_id}`, { approve: true }), 'Early start approved'); } }, 'Approve'),
-              h('button', { class: 'btn small', onclick: async (e) => {
-                e.stopPropagation();
-                const reason = await ask('Decline early start', { input: true, optional: true, ok: 'Decline', danger: true, text: 'The driver is told. Reason (optional):' });
-                if (reason !== null) act(() => api('POST', `/early-starts/${x.req_id}`, { approve: false, reason: reason || null }), 'Early start declined');
-              } }, 'Decline')) : h('span', { class: 'chip warn' }, 'Waiting')],
-        ])));
-    }
+    // Early start requests live on their own page; a short link here when some are waiting
+    await refreshNotes(false);
+    if (notes.early_pending) main.append(h('a', { class: 'card early-link', href: '#early' }, icon('clock', 'sm'),
+      h('b', null, `${notes.early_pending} early start request${notes.early_pending > 1 ? 's' : ''} waiting`), h('span', { class: 'muted small' }, 'Open Early start requests')));
     if (can('dispatch.edit')) {
-      const [drivers, saved, types] = await Promise.all([api('GET', '/drivers'), api('GET', '/addresses').catch(() => []), api('GET', '/vehicle-types').catch(() => [])]);
+      const [drivers, saved, types, trucks] = await Promise.all([api('GET', '/drivers'), api('GET', '/addresses').catch(() => []), api('GET', '/vehicle-types').catch(() => []), api('GET', '/trucks').catch(() => [])]);
+      const truckOpt = (k) => h('option', { value: k.plate }, k.vehicle_type ? `${k.plate} · ${k.vehicle_type}` : k.plate);
       const f = {
         driver_id: h('select', null, h('option', { value: '' }, 'Select'), drivers.map((d) => h('option', { value: d.id }, d.name))),
-        vehicle: h('input', { placeholder: 'TRK-07', maxlength: 40 }),
+        vehicle: h('select', null, h('option', { value: '' }, 'Select'), trucks.filter((k) => k.active).map(truckOpt)),
         second_driver_id: h('select', null, h('option', { value: '' }, 'None (one driver)'), drivers.map((d) => h('option', { value: d.id }, d.name))),
         vehicle_type: h('select', null, h('option', { value: '' }, 'Select'), types.map((x) => h('option', { value: x.name }, x.name))),
         pickup_location: h('input', { list: 'saved-addresses', placeholder: 'Start typing, saved addresses appear', maxlength: 200, autocomplete: 'off' }),
@@ -420,6 +460,18 @@
           const x = await api('POST', '/vehicle-types', { name });
           f.vehicle_type.append(h('option', { value: x.name }, x.name)); f.vehicle_type.value = x.name;
           toast('Vehicle type added');
+        } catch (e) { toast(e.message, true); }
+      }
+      // Picking a truck fills in its vehicle type (it can still be changed)
+      f.vehicle.addEventListener('change', () => { const k = trucks.find((x) => x.plate === f.vehicle.value); if (k && k.vehicle_type) f.vehicle_type.value = k.vehicle_type; });
+      // One button: add a truck plate to the list (Scheduler / Admin). Uses the vehicle type picked above.
+      async function addTruck() {
+        const plate = await ask('New truck', { input: true, ok: 'Add', text: `Licence plate${f.vehicle_type.value ? ` (saved as a ${f.vehicle_type.value})` : ''}. Manage all plates on the Trucks page.` });
+        if (!plate) return;
+        try {
+          const k = await api('POST', '/trucks', { plate, vehicle_type: f.vehicle_type.value || null });
+          trucks.push(k); f.vehicle.append(truckOpt(k)); f.vehicle.value = k.plate;
+          toast('Truck added');
         } catch (e) { toast(e.message, true); }
       }
       // Create the trip. If a driver is already on a trip, or has another trip at an overlapping time (any scheduler's),
@@ -450,7 +502,8 @@
         h('label', { class: 'f' }, 'Driver', f.driver_id), h('label', { class: 'f' }, 'Second driver (team, optional)', f.second_driver_id),
         h('div', { class: 'f' }, h('span', { class: 'flabel' }, 'Vehicle type'), h('div', { class: 'input-row' }, f.vehicle_type,
           h('button', { class: 'btn', type: 'button', onclick: addVehicleType }, icon('plus', 'sm'), 'Add'))),
-        h('label', { class: 'f' }, 'Truck no.', f.vehicle),
+        h('div', { class: 'f' }, h('span', { class: 'flabel' }, 'Truck (licence plate)'), h('div', { class: 'input-row' }, f.vehicle,
+          h('button', { class: 'btn', type: 'button', onclick: addTruck }, icon('plus', 'sm'), 'Add'))),
         h('label', { class: 'f span2' }, 'Pickup address', h('div', { class: 'input-row' }, f.pickup_location, mapButton(f.pickup_location))),
         h('label', { class: 'f span2' }, 'Destination address', h('div', { class: 'input-row' }, f.destination, mapButton(f.destination))),
         h('label', { class: 'f' }, 'Planned start', f.planned_departure,
@@ -1328,6 +1381,8 @@
   let notes = { unread: 0, items: [] };
   function drawBadges() {
     document.querySelectorAll('.bell-badge').forEach((b) => { b.textContent = notes.unread > 9 ? '9+' : String(notes.unread); b.hidden = !notes.unread; });
+    const early = notes.early_pending || 0;
+    document.querySelectorAll('[data-badge="early"]').forEach((b) => { b.textContent = early > 9 ? '9+' : String(early); b.hidden = !early; });
   }
   async function refreshNotes(announce) {
     if (!me || me.must_change_pw) return;
@@ -1419,7 +1474,7 @@
       h('div', { class: 'row mt12' }, h('button', { class: 'btn block', onclick: () => { close(); signOut(); } }, icon('logout', 'sm'), 'Sign out'))));
   }
 
-  const PAGE_FN = { today: pageToday, guide: pageGuide, my: pageMy, dispatch: pageDispatch, board: pageBoard, receipt: pageReceipt, corrections: pageCorrections,
+  const PAGE_FN = { today: pageToday, guide: pageGuide, my: pageMy, dispatch: pageDispatch, early: pageEarly, trucks: pageTrucks, board: pageBoard, receipt: pageReceipt, corrections: pageCorrections,
     history: pageHistory, pay: pagePay, drivers: pageDrivers, payout: pagePayout, settings: pageSettings, users: pageUsers, audit: pageAudit,
     payhist: pagePayHist, addresses: pageAddresses };
 
@@ -1511,7 +1566,8 @@
     if (!me) return renderLogin();
     if (me.must_change_pw) return renderForcedPassword();
     const roles = me.user.roles.map((r) => L.ROLES[r]).join(', ');
-    const link = (p) => h('a', { href: '#' + p.id, 'data-id': p.id }, icon(PAGE_ICON[p.id] || 'board'), h('span', null, p.label));
+    const link = (p) => h('a', { href: '#' + p.id, 'data-id': p.id }, icon(PAGE_ICON[p.id] || 'board'), h('span', null, p.label),
+      p.id === 'early' ? h('span', { class: 'nav-badge', 'data-badge': 'early', hidden: true }) : null);
     // Phones: up to 4 tabs at the bottom, the rest under More. Desktop: sidebar with everything.
     const primary = me.pages.length <= 5 ? me.pages : me.pages.slice(0, 4);
     const rest = me.pages.filter((p) => !primary.includes(p));

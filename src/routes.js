@@ -190,7 +190,12 @@ r.get('/notifications', wrap(async (req, res) => {
   const { rows } = await db.query(
     `select id, kind, title, body, link, created_at, read_at from notifications where user_id = $1 order by id desc limit 30`, [req.user.id]);
   const { rows: [c] } = await db.query('select count(*)::int as n from notifications where user_id = $1 and read_at is null', [req.user.id]);
-  res.json({ unread: c.n, items: rows });
+  let early = 0;
+  if (req.perms.has('dispatch.view') || req.perms.has('dispatch.edit')) {
+    const { rows: [e] } = await db.query(`select count(*)::int as n from early_start_requests e join trips t on t.id = e.trip_id where e.status = 'pending' and t.status = 'dispatched'`);
+    early = e.n;
+  }
+  res.json({ unread: c.n, items: rows, early_pending: early });
 }));
 r.post('/notifications/read', wrap(async (req, res) => {
   await db.query('update notifications set read_at = now() where user_id = $1 and read_at is null', [req.user.id]);
@@ -282,7 +287,7 @@ r.post('/trips', requireAny('dispatch.edit'), wrap(async (req, res) => {
   if (driver2 === driverId) throw new Bad('Pick two different drivers for a team trip.');
   const v = {
     vehicle_type: str(b.vehicle_type, 'vehicle type', { max: 40, optional: true }),
-    vehicle: str(b.vehicle, 'vehicle', { max: 40 }),
+    vehicle: L.normPlate(str(b.vehicle, 'a truck', { max: 40 })),
     pickup: str(b.pickup_location, 'pickup location', { max: 200 }),
     dest: str(b.destination, 'destination', { max: 200 }),
     planned: when(b.planned_departure, 'planned departure'),
@@ -297,6 +302,11 @@ r.post('/trips', requireAny('dispatch.edit'), wrap(async (req, res) => {
         `select 1 from users u join user_roles r on r.user_id = u.id and r.role = 'driver' where u.id = $1 and u.active`, [id]);
       if (!d.length) throw new Bad('Driver not found.');
     }
+    // The truck must be an active one from the Trucks list; its type is used when none is picked
+    const { rows: [truck] } = await q.query('select plate, vehicle_type from trucks where lower(plate) = lower($1) and active', [v.vehicle]);
+    if (!truck) throw new Bad('Pick a truck from the list, or add its plate with the Add button.');
+    v.vehicle = truck.plate;
+    if (!v.vehicle_type && truck.vehicle_type) v.vehicle_type = truck.vehicle_type;
     if (v.vehicle_type) {
       const { rows: vt } = await q.query('select name from vehicle_types where lower(name) = lower($1)', [v.vehicle_type]);
       if (!vt.length) throw new Bad('Pick a vehicle type from the list, or add it with the Add button.');
@@ -355,6 +365,63 @@ r.post('/vehicle-types', requireAny('dispatch.edit'), wrap(async (req, res) => {
     return x;
   });
   res.status(201).json(row);
+}));
+
+// ---------- trucks (licence plates, v0.8.3) ----------
+// Scheduler/Admin keep the company's plates here. Assign trips offers the active ones. Old trips keep the plate text
+// they were assigned with, so renaming or deactivating a truck never changes history.
+async function truckType(q, name) {
+  if (!name) return null;
+  const { rows: vt } = await q.query('select name from vehicle_types where lower(name) = lower($1)', [name]);
+  if (!vt.length) throw new Bad('Pick a vehicle type from the list.');
+  return vt[0].name;
+}
+const plateOf = (v) => {
+  const p = L.normPlate(str(v, 'a licence plate', { max: 20 }));
+  if (!/^[A-Z0-9][A-Z0-9 -]*$/.test(p)) throw new Bad('A plate can use letters, numbers, spaces and dashes.');
+  return p;
+};
+r.get('/trucks', requireAny('dispatch.view', 'dispatch.edit'), wrap(async (req, res) => {
+  const { rows } = await db.query(`select k.id, k.plate, k.vehicle_type, k.active, k.created_at,
+      (select count(*)::int from trips t where lower(t.vehicle) = lower(k.plate)) as trips
+    from trucks k order by k.active desc, k.plate`);
+  res.json(rows);
+}));
+r.post('/trucks', requireAny('dispatch.edit'), wrap(async (req, res) => {
+  const b = req.body || {};
+  const plate = plateOf(b.plate);
+  const row = await db.tx(async (q) => {
+    const type = await truckType(q, str(b.vehicle_type, 'vehicle type', { max: 40, optional: true }));
+    const { rows: dup } = await q.query('select active from trucks where lower(plate) = lower($1)', [plate]);
+    if (dup.length) throw new Bad(dup[0].active ? 'That plate is already in the list.' : 'That plate is in the list but turned off. Turn it back on in Trucks.', 409);
+    const { rows: [x] } = await q.query('insert into trucks(plate, vehicle_type, created_by) values ($1,$2,$3) returning id, plate, vehicle_type, active', [plate, type, req.user.id]);
+    await audit(q, req, 'truck.add', 'truck', x.id, { plate, vehicle_type: type });
+    return x;
+  });
+  res.status(201).json(row);
+}));
+r.post('/trucks/:id', requireAny('dispatch.edit'), wrap(async (req, res) => {
+  const id = int(req.params.id, 'id', { min: 1 });
+  const b = req.body || {};
+  const row = await db.tx(async (q) => {
+    const { rows: [k] } = await q.query('select * from trucks where id = $1 for update', [id]);
+    if (!k) throw notFound();
+    const next = { plate: k.plate, vehicle_type: k.vehicle_type, active: k.active };
+    if (b.plate !== undefined) {
+      next.plate = plateOf(b.plate);
+      const { rows: dup } = await q.query('select 1 from trucks where lower(plate) = lower($1) and id <> $2', [next.plate, id]);
+      if (dup.length) throw new Bad('That plate is already in the list.', 409);
+    }
+    if (b.vehicle_type !== undefined) next.vehicle_type = await truckType(q, str(b.vehicle_type, 'vehicle type', { max: 40, optional: true }));
+    if (b.active !== undefined) {
+      if (typeof b.active !== 'boolean') throw new Bad('active is not a valid value.');
+      next.active = b.active;
+    }
+    await q.query('update trucks set plate = $2, vehicle_type = $3, active = $4 where id = $1', [id, next.plate, next.vehicle_type, next.active]);
+    await audit(q, req, 'truck.edit', 'truck', id, { before: { plate: k.plate, vehicle_type: k.vehicle_type, active: k.active }, after: next });
+    return { id, ...next };
+  });
+  res.json(row);
 }));
 
 // ---------- address book ----------
@@ -485,7 +552,7 @@ r.post('/trips/:id/early-start', requireAny('trip.own'), wrap(async (req, res) =
   });
   const startTxt = new Date(out.planned).toLocaleString('en-CA', { timeZone: L.TIMEZONE, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
   await N.safeNotify(N.usersWith(['dispatch.edit'], [req.user.id]), { kind: 'early', title: 'Early start request',
-    body: `${req.user.name} · trip ${out.trip_no} (planned ${startTxt})${reason ? ' · ' + reason : ''}`, link: '#dispatch', key: `early1:${out.id}` });
+    body: `${req.user.name} · trip ${out.trip_no} (planned ${startTxt})${reason ? ' · ' + reason : ''}`, link: '#early', key: `early1:${out.id}` });
   res.status(201).json({ id: out.id, status: 'pending' });
 }));
 
@@ -494,7 +561,7 @@ r.get('/early-starts', requireAny('dispatch.view', 'dispatch.edit'), wrap(async 
     `select e.id, e.trip_id, e.status, e.reason, e.decline_reason, e.created_at, e.decided_at, t.trip_no, t.planned_departure, t.status as trip_status,
             t.pickup_location, t.destination, d.name as driver_name, b.name as decided_by_name
        from early_start_requests e join trips t on t.id = e.trip_id join users d on d.id = t.driver_id left join users b on b.id = e.decided_by
-      where (e.status = 'pending' and t.status = 'dispatched') or e.decided_at > now() - interval '2 days'
+      where (e.status = 'pending' and t.status = 'dispatched') or e.decided_at > now() - interval '7 days'
       order by (e.status = 'pending') desc, e.id desc limit 100`);
   res.json(rows);
 }));
