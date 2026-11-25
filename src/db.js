@@ -12,6 +12,8 @@ const BACKFILL_ADDRESSES = `insert into addresses(address, use_count, last_used)
   select min(a), count(*), max(c) from (select pickup_location a, created_at c from trips
     union all select destination, created_at from trips) x group by lower(a) on conflict do nothing;`;
 
+const LOW_MEMORY_CONF = ['shared_buffers = 16MB', 'temp_buffers = 2MB', 'work_mem = 2MB', 'maintenance_work_mem = 16MB', 'wal_buffers = 1MB'];
+
 async function init() {
   const url = process.env.DATABASE_URL;
   if (url) {
@@ -44,7 +46,11 @@ async function init() {
     const { PGlite } = await import('@electric-sql/pglite');
     const dir = process.env.PGLITE_DIR || path.join(__dirname, '..', 'data', 'pglite');
     fs.mkdirSync(path.dirname(dir), { recursive: true });
-    const db = new PGlite(dir);
+    // Small memory footprint so the demo fits hosts with 512 MB (Render free plan). Postgres defaults (128 MB shared
+    // buffers etc.) are sized for a big server; this app's data is tiny. The settings are used only when opening an
+    // existing database: with them, creating a brand-new one (initdb) needs more memory, not less.
+    const existing = fs.existsSync(path.join(dir, 'PG_VERSION'));
+    const db = new PGlite(dir, existing ? { postgresqlconf: LOW_MEMORY_CONF } : {});
     await db.waitReady;
     impl = {
       kind: 'pglite',

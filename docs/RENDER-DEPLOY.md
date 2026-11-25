@@ -27,7 +27,7 @@ This guide puts Trip Log online on Render's free plan as a **demo only**. It run
 4. If Render asks for a card for the Blueprint, use **New +** > **Web Service** instead and pick the repo with these settings:
    - Runtime: **Node**
    - Instance type: **Free**
-   - Build command: `npm ci --omit=dev`
+   - Build command: `npm ci --omit=dev && node src/prepare-db.js` (creates the empty database during the build; doing it at start-up needs more than 512 MB)
    - Start command: `node src/server.js`
    - Health check path: `/healthz`
    - Environment variables: the table below
@@ -42,7 +42,7 @@ This guide puts Trip Log online on Render's free plan as a **demo only**. It run
 | `TRUST_PROXY` | `1` | Trusts Render's proxy so HTTPS and visitor IPs are detected correctly. |
 | `DEMO_LOGIN` | `true` | Shows the demo-account buttons and enables Reset demo data. |
 | `SEED_DEMO` | `true` | Loads the demo accounts and sample trips on start. |
-| `TZ` | `America/Toronto` | Uses the company time zone for dates and times. |
+| `TZ` | `America/Vancouver` | Uses the company time zone for dates and times. |
 
 - **Do not set `DATABASE_URL`.** Without it the app uses its built-in demo database, which is what this demo needs (Reset demo data only works that way).
 - **Do not set `COOKIE_SECURE=false`.** Render serves HTTPS, so secure cookies must stay on.

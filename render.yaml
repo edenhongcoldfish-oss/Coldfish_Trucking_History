@@ -5,13 +5,14 @@ services:
     name: coldfish-trucking-demo
     runtime: node
     plan: free
-    buildCommand: npm ci --omit=dev
+    # The empty database is created during the build: creating it at start-up needs more than the 512 MB free plan
+    buildCommand: npm ci --omit=dev && node src/prepare-db.js
     startCommand: node src/server.js
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
       - key: NODE_VERSION
-        value: 22
+        value: "22"
       - key: HOST
         value: 0.0.0.0
       - key: TRUST_PROXY
@@ -21,4 +22,4 @@ services:
       - key: SEED_DEMO
         value: "true"
       - key: TZ
-        value: America/Toronto
+        value: America/Vancouver

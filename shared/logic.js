@@ -6,7 +6,7 @@
   'use strict';
 
   // Bump on every release. The browser compares it with the server's copy to spot a server that was not restarted.
-  const APP_VERSION = '0.8.3';
+  const APP_VERSION = '0.8.4';
   // Main species shown as quick picks in Receiving (anything else goes under Other)
   const MAIN_SPECIES = ['Black Cod', 'Halibut', 'Salmon'];
   // Receiving: average weight of one packing unit, used to count cases/totes from the total weight.

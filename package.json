@@ -1,6 +1,6 @@
 {
   "name": "trucking-trip-tracker",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "private": true,
   "description": "Driver trip, hours and pay tracking web app (development draft)",
   "main": "src/server.js",

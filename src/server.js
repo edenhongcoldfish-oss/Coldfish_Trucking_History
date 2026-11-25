@@ -13,12 +13,17 @@ async function main() {
   console.log(`DB: ${info.kind}${info.fresh ? ' (new)' : ''}`);
   // Demo data only for the demo (npm run demo / start.bat) or when asked. A real install starts empty and asks for the first admin.
   const demo = process.env.DEMO_LOGIN === 'true' || process.env.SEED_DEMO === 'true';
-  if (info.fresh && demo && process.env.SEED_DEMO !== 'false') await seed();
+  // Also seeds a database that exists but has no accounts yet (created empty at build time by src/prepare-db.js)
+  const empty = !info.fresh && Number((await db.query('select count(*)::int as n from users')).rows[0].n) === 0;
+  if ((info.fresh || empty) && demo && process.env.SEED_DEMO !== 'false') await seed();
 
   const app = express();
   app.disable('x-powered-by');
   // Use the real client IP behind the NAS tunnel (Tailscale/Cloudflare)
-  app.set('trust proxy', process.env.TRUST_PROXY || 'loopback');
+  // A number (e.g. TRUST_PROXY=1 on Render) means "trust that many proxy hops". Express reads the string "1" as an
+  // IP address instead, which trusts nothing, so convert it here.
+  const tp = process.env.TRUST_PROXY;
+  app.set('trust proxy', tp == null || tp === '' ? 'loopback' : /^\d+$/.test(tp) ? Number(tp) : tp === 'true' ? true : tp);
 
   app.use(helmet({
     contentSecurityPolicy: {
