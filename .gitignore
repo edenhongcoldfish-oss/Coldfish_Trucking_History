@@ -1,0 +1,15 @@
+node_modules/
+data/
+dist/
+pgdata/
+backups/
+*.log
+.env
+.env.*
+!.env.example
+*.zip
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.gz

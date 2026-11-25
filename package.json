@@ -1,0 +1,26 @@
+{
+  "name": "trucking-trip-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Driver trip, hours and pay tracking web app (development draft)",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "demo": "node src/demo.js",
+    "test": "node test/smoke.js",
+    "build:preview": "node preview/build.js",
+    "reset-demo": "node -e \"require('fs').rmSync('data',{recursive:true,force:true});console.log('Local demo database deleted. Run npm run demo to start fresh.')\""
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.17",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "pg": "^8.23.1",
+    "web-push": "3.6.7"
+  }
+}
